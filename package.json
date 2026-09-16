@@ -1,0 +1,30 @@
+{
+  "name": "hallpass",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && firebase deploy",
+    "migrate": "node scripts/migrate-to-teachers.mjs"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1",
+    "firebase": "^10.14.1",
+    "react": "^18.3.1",
+    "react-chartjs-2": "^5.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.3"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-legacy": "^5.4.3",
+    "@vitejs/plugin-react": "^4.3.1",
+    "terser": "^5.47.1",
+    "typescript": "^5.5.2",
+    "vite": "^5.3.1"
+  }
+}

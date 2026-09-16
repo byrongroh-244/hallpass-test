@@ -1,0 +1,28 @@
+{
+  "rules": {
+    "teachers": {
+      "$teacherId": {
+        "students": {
+          ".read": true,
+          ".write": true
+        },
+        "logs": {
+          ".read": true,
+          ".write": true
+        },
+        "roster": {
+          ".read": true,
+          ".write": true
+        }
+      }
+    },
+    "directory": {
+      ".read": true,
+      ".write": true
+    },
+    "config": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "Hall Pass",
+  "short_name": "Hall Pass",
+  "description": "Student hall pass tracking system",
+  "start_url": "/hallpass/",
+  "scope": "/hallpass/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/hallpass/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/hallpass/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
