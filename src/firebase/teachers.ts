@@ -7,7 +7,12 @@
  *     byron-groh/   { displayName: "Byron Groh", createdAt: 1758000000000 }
  *     jane-smith/   { displayName: "Jane Smith", createdAt: 1758003600000 }
  *   config/
- *     pin: "0244"   — the one universal PIN, shared by every teacher's scanner
+ *     pin: "0244"   — legacy universal PIN, kept only as a fallback for
+ *                     teachers who haven't set their own PIN yet (see below)
+ *   teachers/{teacherId}/settings/
+ *     maxOut: 5       — this teacher's default "max students out" for the Scanner
+ *     pin: "1234"     — this teacher's own PIN for their Scanner (exiting the
+ *                       kiosk, changing the max-out limit)
  *
  * `directory/` is a small, flat index so the teacher picker can list every
  * profile without pulling each teacher's full roster/students/logs subtree —
@@ -88,10 +93,10 @@ export async function renameTeacher(teacherId: string, displayName: string): Pro
   await update(ref(db, `directory/${teacherId}`), { displayName: trimmed })
 }
 
-// ─── Universal PIN ────────────────────────────────────────────────────────────
-// One PIN, shared by every teacher's Scanner (leaving the kiosk, changing the
-// day/period/max-out settings). Lives in Firebase — rather than a build-time
-// env var — so it can be changed without a redeploy.
+// ─── Legacy universal PIN ─────────────────────────────────────────────────────
+// The original one-PIN-for-everyone value. Kept only as a fallback for a
+// teacher who hasn't set their own PIN yet (see getEffectivePin below) — new
+// setup should use setTeacherPin instead.
 
 export async function getPin(): Promise<string> {
   const snap = await get(ref(db, 'config/pin'))
@@ -101,4 +106,62 @@ export async function getPin(): Promise<string> {
 
 export async function setPin(pin: string): Promise<void> {
   await set(ref(db, 'config/pin'), pin)
+}
+
+// ─── Per-teacher settings ─────────────────────────────────────────────────────
+// A teacher's own defaults, set from their Settings page (/t/:teacherId/settings)
+// and synced via Firebase so they follow the teacher to any device — a fresh
+// iPad, a browser refresh, whatever — rather than the app's hardcoded defaults.
+// A device's Scanner can still remember its own last-used max-out value in
+// localStorage on top of this (see Scanner.tsx); this is just what a brand-new
+// device starts from.
+
+export interface TeacherSettings {
+  /** Default "max students out at once" for this teacher's Scanner. */
+  maxOut: number
+  /**
+   * This teacher's own PIN. Empty string means "not set yet" — the Scanner
+   * should fall back to the legacy shared PIN (getPin/DEFAULT_PIN) in that
+   * case, so nothing that worked before this feature existed breaks.
+   */
+  pin: string
+}
+
+const DEFAULT_MAX_OUT = 5
+
+function normalizeSettings(raw: unknown): TeacherSettings {
+  const val = (raw as Partial<TeacherSettings>) ?? {}
+  return {
+    maxOut: typeof val.maxOut === 'number' && val.maxOut > 0 ? val.maxOut : DEFAULT_MAX_OUT,
+    pin: typeof val.pin === 'string' ? val.pin : '',
+  }
+}
+
+export async function getTeacherSettings(teacherId: string): Promise<TeacherSettings> {
+  const snap = await get(ref(db, `teachers/${teacherId}/settings`))
+  return normalizeSettings(snap.val())
+}
+
+export function watchTeacherSettings(teacherId: string, cb: (s: TeacherSettings) => void): () => void {
+  const r = ref(db, `teachers/${teacherId}/settings`)
+  return onValue(r, snap => cb(normalizeSettings(snap.val())))
+}
+
+export async function setTeacherMaxOut(teacherId: string, maxOut: number): Promise<void> {
+  await update(ref(db, `teachers/${teacherId}/settings`), { maxOut })
+}
+
+export async function setTeacherPin(teacherId: string, pin: string): Promise<void> {
+  await update(ref(db, `teachers/${teacherId}/settings`), { pin })
+}
+
+/**
+ * The PIN a teacher's Scanner should actually use: their own custom PIN if
+ * they've set one, otherwise the legacy shared building-wide PIN — so a
+ * teacher who never opens Settings keeps working exactly as before.
+ */
+export async function getEffectivePin(teacherId: string): Promise<string> {
+  const settings = await getTeacherSettings(teacherId)
+  if (settings.pin) return settings.pin
+  return getPin()
 }

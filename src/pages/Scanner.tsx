@@ -7,7 +7,7 @@ import { useRoster } from '../hooks/useRoster'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
 import { scheduleStr, writeStudentOut, writeStudentIn, writeAutoReset, writeStaleReset } from '../firebase/writes'
-import { getPin } from '../firebase/teachers'
+import { getEffectivePin, getTeacherSettings } from '../firebase/teachers'
 import { fmt, fmt12, todayStr } from '../utils/schedule'
 import type { ScheduleDay, StartType, Period } from '../types'
 import { useWindowSize } from '../hooks/useWindowSize'
@@ -120,9 +120,23 @@ export default function Scanner() {
 
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 1000); return () => clearInterval(id) }, [])
 
-  // The universal PIN lives in Firebase now (config/pin), not a build-time
-  // env var, so it can be changed without a redeploy — load it once.
-  useEffect(() => { getPin().then(setAdminPin) }, [])
+  // PIN lives in Firebase now, not a build-time env var — this teacher's own
+  // PIN if they've set one (Settings page), falling back to the legacy
+  // shared building PIN otherwise.
+  useEffect(() => { if (teacherId) getEffectivePin(teacherId).then(setAdminPin) }, [teacherId])
+
+  // Seed this device's max-out from the teacher's Firebase default — but
+  // only if this device has never had a value set locally. Once a device
+  // has one (via the Schedule > Admin flow below), that's its own "last
+  // used here" value and takes precedence over the teacher's default.
+  useEffect(() => {
+    if (!teacherId) return
+    if (localStorage.getItem(lsKeyFor(teacherId, 'hp_maxOut')) !== null) return
+    getTeacherSettings(teacherId).then(settings => {
+      setMaxOut(settings.maxOut)
+      setPickMaxOut(settings.maxOut)
+    })
+  }, [teacherId])
 
   // Reset period when day/start changes
   useEffect(() => {

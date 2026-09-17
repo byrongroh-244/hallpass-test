@@ -5,6 +5,7 @@ import Scanner from './pages/Scanner'
 import Dashboard from './pages/Dashboard'
 import Analytics from './pages/Analytics'
 import Editor from './pages/Editor'
+import TeacherSettings from './pages/TeacherSettings'
 import { LEGACY_TEACHER_ID } from './firebase/teachers'
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/t/:teacherId/dashboard" element={<Dashboard />} />
         <Route path="/t/:teacherId/analytics" element={<Analytics />} />
         <Route path="/t/:teacherId/editor"    element={<Editor />} />
+        <Route path="/t/:teacherId/settings"  element={<TeacherSettings />} />
 
         {/* Legacy routes (pre-multi-teacher bookmarks / iPad home-screen icons) —
             redirect to the migrated "legacy" teacher profile so nothing that
