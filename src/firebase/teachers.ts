@@ -142,9 +142,23 @@ export async function getTeacherSettings(teacherId: string): Promise<TeacherSett
   return normalizeSettings(snap.val())
 }
 
-export function watchTeacherSettings(teacherId: string, cb: (s: TeacherSettings) => void): () => void {
+/**
+ * `onError` fires if the read is denied (most likely cause: the Firebase
+ * rules haven't been updated to include the new `settings` node yet — see
+ * firebase.rules.json). Without it, a denied read just never calls `cb` and
+ * the caller is stuck showing a loading state forever with no explanation.
+ */
+export function watchTeacherSettings(
+  teacherId: string,
+  cb: (s: TeacherSettings) => void,
+  onError?: (err: Error) => void
+): () => void {
   const r = ref(db, `teachers/${teacherId}/settings`)
-  return onValue(r, snap => cb(normalizeSettings(snap.val())))
+  return onValue(
+    r,
+    snap => cb(normalizeSettings(snap.val())),
+    err => onError?.(err as unknown as Error)
+  )
 }
 
 export async function setTeacherMaxOut(teacherId: string, maxOut: number): Promise<void> {

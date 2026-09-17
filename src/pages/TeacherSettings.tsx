@@ -27,8 +27,10 @@ export default function TeacherSettings() {
   const teacherValid = useTeacherGuard(teacherId)
 
   const [settings, setSettings] = useState<Settings | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [maxOut, setMaxOutLocal] = useState<number>(5)
   const [maxOutSaved, setMaxOutSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   const [pinDigits, setPinDigits] = useState(['', '', '', ''])
   const [pinSaved, setPinSaved] = useState(false)
@@ -36,22 +38,59 @@ export default function TeacherSettings() {
 
   useEffect(() => {
     if (!teacherId) return
-    const unsubscribe = watchTeacherSettings(teacherId, s => {
-      setSettings(s)
-      setMaxOutLocal(s.maxOut)
-    })
+    const unsubscribe = watchTeacherSettings(
+      teacherId,
+      s => { setSettings(s); setMaxOutLocal(s.maxOut); setLoadError(null) },
+      err => setLoadError(err.message || 'Permission denied')
+    )
     return unsubscribe
   }, [teacherId])
 
   if (teacherValid === false) return <TeacherNotFound />
 
+  if (loadError) {
+    return (
+      <div style={{ minHeight: '100vh', background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div style={{ maxWidth: 520, margin: '0 auto', padding: '2.5rem 1.5rem' }}>
+          <Link to={`/t/${teacherId}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: C.muted, fontSize: 12.5, fontWeight: 600, textDecoration: 'none', marginBottom: 20 }}>
+            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" /></svg>
+            Back to menu
+          </Link>
+          <div style={{ background: C.white, borderRadius: 12, padding: '1.5rem', border: `1px solid ${C.border}` }}>
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: '1.3rem', color: C.ink, margin: '0 0 10px' }}>Couldn't load settings</h2>
+            <p style={{ fontSize: 13.5, color: C.slate, lineHeight: 1.6, margin: '0 0 12px' }}>
+              This is almost always a Firebase rules issue — the <code>settings</code> node under each
+              teacher needs its own read/write rule, the same way <code>roster</code>, <code>students</code>,
+              and <code>logs</code> already do.
+            </p>
+            <p style={{ fontSize: 13.5, color: C.slate, lineHeight: 1.6, margin: '0 0 12px' }}>
+              In the Firebase console → Realtime Database → Rules, make sure each teacher's rules include:
+            </p>
+            <pre style={{ background: C.cloud, borderRadius: 8, padding: '10px 12px', fontSize: 12.5, overflowX: 'auto', margin: '0 0 12px' }}>
+{`"settings": {
+  ".read": true,
+  ".write": true
+}`}
+            </pre>
+            <p style={{ fontSize: 12, color: C.muted, margin: 0 }}>Error detail: {loadError}</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const hasCustomPin = !!settings?.pin
   const maxOutDirty = settings !== null && maxOut !== settings.maxOut
 
   async function saveMaxOut() {
-    await setTeacherMaxOut(teacherId, maxOut)
-    setMaxOutSaved(true)
-    setTimeout(() => setMaxOutSaved(false), 2000)
+    setSaveError('')
+    try {
+      await setTeacherMaxOut(teacherId, maxOut)
+      setMaxOutSaved(true)
+      setTimeout(() => setMaxOutSaved(false), 2000)
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Could not save — check Firebase rules')
+    }
   }
 
   async function savePin() {
@@ -60,17 +99,25 @@ export default function TeacherSettings() {
       setPinError('Enter all 4 digits')
       return
     }
-    await setTeacherPin(teacherId, pin)
-    setPinDigits(['', '', '', ''])
-    setPinError('')
-    setPinSaved(true)
-    setTimeout(() => setPinSaved(false), 2000)
+    try {
+      await setTeacherPin(teacherId, pin)
+      setPinDigits(['', '', '', ''])
+      setPinError('')
+      setPinSaved(true)
+      setTimeout(() => setPinSaved(false), 2000)
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Could not save — check Firebase rules')
+    }
   }
 
   async function clearPin() {
-    await setTeacherPin(teacherId, '')
-    setPinDigits(['', '', '', ''])
-    setPinError('')
+    try {
+      await setTeacherPin(teacherId, '')
+      setPinDigits(['', '', '', ''])
+      setPinError('')
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Could not save — check Firebase rules')
+    }
   }
 
   return (
@@ -111,6 +158,7 @@ export default function TeacherSettings() {
                 style={{ width: '100%', marginTop: 10, padding: '10px 0', borderRadius: 8, border: 'none', background: maxOutDirty ? C.primary : C.cloud, color: maxOutDirty ? '#fff' : C.muted, fontSize: 14, fontWeight: 700, cursor: maxOutDirty ? 'pointer' : 'default' }}>
                 {maxOutSaved ? 'Saved ✓' : maxOutDirty ? 'Save default' : 'No change'}
               </button>
+              {saveError && <p style={{ color: C.red, fontSize: 12.5, marginTop: 8, marginBottom: 0 }}>{saveError}</p>}
             </div>
 
             {/* ── Custom PIN ───────────────────────────────────────────────────── */}
