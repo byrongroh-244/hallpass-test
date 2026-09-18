@@ -8,7 +8,7 @@
  * teachers' classes — even ones that happen to share a period name like
  * "Red1" — never collide.
  */
-import { ref, set, push, serverTimestamp, runTransaction } from 'firebase/database'
+import { ref, push, serverTimestamp, runTransaction } from 'firebase/database'
 import { db } from './config'
 import type { ScheduleDay, StartType } from '../types'
 
@@ -38,10 +38,22 @@ interface ScanOutParams {
 export async function writeStudentOut({ teacherId, day, start, name, period, outTime, date }: ScanOutParams) {
   const key = studentKey(day, start, name, period)
   const sched = scheduleStr(day, start)
-  await set(ref(db, `teachers/${teacherId}/students/${key}`), {
-    name, period, schedule: sched, status: 'out',
-    timestamp: serverTimestamp(), outTimestamp: serverTimestamp(),
+
+  // Guard the status flip in a transaction — a duplicate tap (e.g. a
+  // pointermove firing commitSwipe twice) or a second device/tab open to the
+  // same class both calling this for the same student now race on the same
+  // node instead of both blindly writing. If the student is already marked
+  // 'out' by the time this runs, treat it as a no-op: don't stomp the
+  // original out-time and don't log a second "out" for the same trip.
+  let didWrite = false
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await runTransaction(ref(db, `teachers/${teacherId}/students/${key}`), (current: any) => {
+    if (current && current.status === 'out') { didWrite = false; return current }
+    didWrite = true
+    return { name, period, schedule: sched, status: 'out', timestamp: outTime, outTimestamp: outTime }
   })
+  if (!tx.committed || !didWrite) return
+
   await push(ref(db, `teachers/${teacherId}/logs`), {
     studentName: name, period, schedule: sched, action: 'out',
     timestamp: serverTimestamp(), date,
@@ -59,10 +71,21 @@ interface ScanInParams {
 export async function writeStudentIn({ teacherId, day, start, name, period, outStart, inTime, date }: ScanInParams) {
   const key = studentKey(day, start, name, period)
   const sched = scheduleStr(day, start)
-  await set(ref(db, `teachers/${teacherId}/students/${key}`), {
-    name, period, schedule: sched, status: 'in',
-    timestamp: serverTimestamp(), outTimestamp: null,
+
+  // Same guard as writeStudentOut, mirrored: only flip 'out' -> 'in' once.
+  // A redundant call (duplicate tap, second device) that arrives after the
+  // student is already 'in' sees that and skips logging — otherwise the
+  // same single trip gets written to /logs twice with near-identical
+  // durations, which is exactly what shows up as "double-logged trips".
+  let didWrite = false
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await runTransaction(ref(db, `teachers/${teacherId}/students/${key}`), (current: any) => {
+    if (!current || current.status !== 'out') { didWrite = false; return current }
+    didWrite = true
+    return { name, period, schedule: sched, status: 'in', timestamp: inTime, outTimestamp: null }
   })
+  if (!tx.committed || !didWrite) return
+
   await push(ref(db, `teachers/${teacherId}/logs`), {
     studentName: name, period, schedule: sched, action: 'in',
     timestamp: serverTimestamp(), date,
@@ -83,12 +106,25 @@ export async function writeManualAction({ teacherId, day, start, name, period, a
   const key = studentKey(day, start, name, period)
   const sched = scheduleStr(day, start)
   const goingOut = action === 'manual-out'
-  await set(ref(db, `teachers/${teacherId}/students/${key}`), {
-    name, period, schedule: sched,
-    status: goingOut ? 'out' : 'in',
-    timestamp: serverTimestamp(),
-    outTimestamp: goingOut ? serverTimestamp() : null,
+
+  // Same guard as writeStudentOut/In — protects against a duplicate click on
+  // the Dashboard's manual override button, or the Dashboard being open on
+  // two devices/tabs at once.
+  let didWrite = false
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await runTransaction(ref(db, `teachers/${teacherId}/students/${key}`), (current: any) => {
+    const targetStatus = goingOut ? 'out' : 'in'
+    if (current && current.status === targetStatus) { didWrite = false; return current }
+    didWrite = true
+    return {
+      name, period, schedule: sched,
+      status: targetStatus,
+      timestamp: now,
+      outTimestamp: goingOut ? now : null,
+    }
   })
+  if (!tx.committed || !didWrite) return
+
   await push(ref(db, `teachers/${teacherId}/logs`), {
     studentName: name, period, schedule: sched, action,
     timestamp: serverTimestamp(), date,
