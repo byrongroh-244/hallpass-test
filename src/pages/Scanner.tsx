@@ -288,14 +288,23 @@ export default function Scanner() {
 
   const openSwipe = (name: string) => {
     const isOut = outSet.has(name)
-    // Check period exists and is currently active
     if (!period) { setErrorPopup({ type: 'notActive' }); return }
-    const now = new Date()
-    const t = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0')
-    const active = t >= period.startTime && t < period.endTime
-    if (!active) { setErrorPopup({ type: 'notActive' }); return }
-    // Check capacity only when checking OUT (not checking back in)
-    if (!isOut && outSet.size >= maxOut) { setErrorPopup({ type: 'maxOut' }); return }
+    // The "is this period currently active" check only applies to a NEW
+    // checkout — someone already out must always be able to check back in,
+    // even if the clock has ticked past this period's end time (or hasn't
+    // reached its start yet) by the time they're back. Gating check-in on
+    // this too meant a trip that ran even slightly long had no way to be
+    // closed out by the student at all — it just sat "out" until the
+    // period-over auto-reset in Scanner's tick loop eventually swept it up,
+    // which is exactly the "no way to slide back in" bug this fixes.
+    if (!isOut) {
+      const now = new Date()
+      const t = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0')
+      const active = t >= period.startTime && t < period.endTime
+      if (!active) { setErrorPopup({ type: 'notActive' }); return }
+      // Check capacity only when checking OUT (not checking back in)
+      if (outSet.size >= maxOut) { setErrorPopup({ type: 'maxOut' }); return }
+    }
     // Store everything in ref right now, before any state changes
     swipeRef.current = { name, action: isOut ? 'in' : 'out', period, day, start, outTimes }
     setSwipeName(name)
