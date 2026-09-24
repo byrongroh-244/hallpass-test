@@ -12,6 +12,7 @@ import TeacherNotFound from '../components/TeacherNotFound'
 import { fmtDuration, fmt, MAX_OUT, todayStr } from '../utils/schedule'
 import type { ScheduleDay, StartType, StudentRecord } from '../types'
 import { useWindowSize } from '../hooks/useWindowSize'
+import { serverNow } from '../firebase/clock'
 
 const C = {
   bg: '#f8fafc', white: '#fff', ink: '#0f172a', slate: '#475569',
@@ -137,7 +138,7 @@ function LongTripAlert({ students, onMarkIn }: {
 }) {
   const [dismissed, setDismissed] = useState<string[]>([])
   const alertStudents = students.filter(s =>
-    s.outTimestamp && Date.now() - s.outTimestamp > 600_000 && !dismissed.includes(s.name)
+    s.outTimestamp && serverNow() - s.outTimestamp > 600_000 && !dismissed.includes(s.name)
   )
   if (alertStudents.length === 0) return null
 
@@ -240,7 +241,7 @@ export default function Dashboard() {
     async function runResetSweep() {
       const snap = await get(ref(db, `teachers/${teacherId}/students`))
       const all = (snap.val() ?? {}) as Record<string, StudentRecord>
-      const now = Date.now(); const today = todayStr()
+      const now = serverNow(); const today = todayStr()
 
       // Stale sweep — reset any student still marked "out" from a previous
       // calendar day, regardless of which period/class is currently selected
@@ -291,7 +292,7 @@ export default function Dashboard() {
     return m
   }, [todayLogs, sched, period])
 
-  const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000
+  const twelveHoursAgo = serverNow() - 12 * 60 * 60 * 1000
   const recentlyActiveSet = useMemo(() => {
     const s = new Set<string>()
     todayLogs.forEach(l => {
@@ -332,7 +333,7 @@ export default function Dashboard() {
       ).length
       if (out >= MAX_OUT) { alert(`Max ${MAX_OUT} students out at a time`); return }
     }
-    const now = Date.now(); const today = todayStr()
+    const now = serverNow(); const today = todayStr()
     await writeManualAction({
       teacherId, day, start, name, period: period!.name,
       action: `manual-${action}` as 'manual-in' | 'manual-out',
@@ -478,7 +479,7 @@ function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
   compact?: boolean
 }) {
   void tick
-  const elapsed = isOut && s.outTimestamp ? Date.now() - s.outTimestamp : 0
+  const elapsed = isOut && s.outTimestamp ? serverNow() - s.outTimestamp : 0
   const over10 = elapsed > 600_000
   const over5  = elapsed > 300_000
 

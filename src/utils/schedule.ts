@@ -18,7 +18,7 @@ export function buildStudentKey(day: ScheduleDay, start: StartType, name: string
 }
 
 export function fmt(ms: number): string {
-  const s = Math.floor(ms / 1000)
+  const s = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`
 }
 

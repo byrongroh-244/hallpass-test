@@ -11,6 +11,7 @@ import { getEffectivePin, getTeacherSettings } from '../firebase/teachers'
 import { fmt, fmt12, todayStr } from '../utils/schedule'
 import type { ScheduleDay, StartType, Period } from '../types'
 import { useWindowSize } from '../hooks/useWindowSize'
+import { serverNow } from '../firebase/clock'
 
 const C = {
   bg: '#f8fafc', white: '#ffffff', ink: '#0f172a', slate: '#475569',
@@ -212,7 +213,7 @@ export default function Scanner() {
     const now = new Date()
     const t = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0')
     const periodOver = p ? t >= p.endTime : false
-    const nowMs = Date.now()
+    const nowMs = serverNow()
     const resetTime = nowMs
     const today = todayStr()
     const maxTripMs = maxTripMinutesRef.current * 60 * 1000
@@ -319,7 +320,7 @@ export default function Scanner() {
     if (!p || !name) return
     isDragging.current = false
 
-    const now = Date.now()
+    const now = serverNow()
     const today = new Date().toISOString().split('T')[0]
 
     // Dismiss the popup immediately — don't make the UI wait on a Firebase
@@ -479,7 +480,7 @@ export default function Scanner() {
                   <div style={{ fontSize: 10, fontWeight: 700, color: C.red, textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 8 }}>Students Out</div>
                   <div style={{ display: 'grid', gridTemplateColumns: isIPadLandscape ? 'repeat(5, 1fr)' : isLargerThanIPad ? 'repeat(6, 1fr)' : 'repeat(3, 1fr)', gap: isIPadLandscape ? 10 : isLargerThanIPad ? 10 : 8 }}>
                     {periodStudents.filter(n => outSet.has(n)).map(name => {
-                      const elapsed = Date.now() - (outTimes[name] ?? Date.now())
+                      const elapsed = serverNow() - (outTimes[name] ?? serverNow())
                       return (
                         <button key={name} onClick={() => openSwipe(name)}
                           style={{ border: `1.5px solid ${C.redBorder}`, background: C.redBg, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
