@@ -5,6 +5,12 @@ import {
   parseRosterCSV, parseExcelTSV, deduplicateNames,
 } from '../firebase/roster'
 import type { RosterData, DayKey, PeriodNum, RosterPeriod, ExcelParseResult } from '../firebase/roster'
+import {
+  watchHolds, setHold, clearHold, activeHoldsFor, isHoldActive,
+  dateInputFromToday, dateInputFromMs, msFromDateInput, holdLongLabel, holdShortLabel,
+} from '../firebase/holds'
+import type { HoldsData, PassHold } from '../firebase/holds'
+import { serverNow } from '../firebase/clock'
 import { PERIOD_TIMES, fmt12 } from '../data/periods'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
@@ -16,6 +22,7 @@ const C = {
   red: '#ef4444', redBg: 'rgba(239,68,68,0.06)',
   primary: '#667eea', primaryBg: 'rgba(102,126,234,0.08)',
   amber: '#f59e0b', amberBg: 'rgba(245,158,11,0.08)',
+  amberBorder: 'rgba(245,158,11,0.45)', amberInk: '#b45309',
   purple: '#8b5cf6',
 }
 
@@ -237,8 +244,16 @@ function ExcelUpload({ roster, onConfirm }: {
 
 // ─── Period card ──────────────────────────────────────────────────────────────
 
-function PeriodCard({ day, period, data, onClick }: {
-  day: DayKey; period: PeriodNum; data?: RosterPeriod; onClick: () => void
+function PauseIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" />
+    </svg>
+  )
+}
+
+function PeriodCard({ day, period, data, pausedCount, onClick }: {
+  day: DayKey; period: PeriodNum; data?: RosterPeriod; pausedCount: number; onClick: () => void
 }) {
   const times = PERIOD_TIMES.find(p => p.period === period)!
   const hasClass = !!(data?.name?.trim())
@@ -266,23 +281,133 @@ function PeriodCard({ day, period, data, onClick }: {
       <div style={{ fontSize: 11, color: C.muted }}>
         Regular {fmt12(times.regular.start)}–{fmt12(times.regular.end)} · Late {fmt12(times.late.start)}–{fmt12(times.late.end)}
       </div>
+      {pausedCount > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, fontSize: 11, fontWeight: 600, color: C.amberInk }}>
+          <PauseIcon size={11} /> {pausedCount} hall pass{pausedCount === 1 ? '' : 'es'} paused
+        </div>
+      )}
     </button>
+  )
+}
+
+// ─── Pause dialog ─────────────────────────────────────────────────────────────
+// Sets (or changes) how long one student's hall pass is paused. The date the
+// teacher picks is the day the pass comes BACK — see holds.ts.
+
+const PAUSE_PRESETS: { label: string; days: number }[] = [
+  { label: 'Tomorrow', days: 1 },
+  { label: '1 week', days: 7 },
+  { label: '2 weeks', days: 14 },
+]
+
+function PauseDialog({ name, existing, onCancel, onConfirm, onResume }: {
+  name: string
+  existing: PassHold | null
+  onCancel: () => void
+  onConfirm: (until: number | null) => Promise<void>
+  onResume: () => Promise<void>
+}) {
+  const [openEnded, setOpenEnded] = useState(existing ? existing.until === null : false)
+  const [date, setDate] = useState(() =>
+    existing && existing.until !== null ? dateInputFromMs(existing.until) : dateInputFromToday(7))
+  const [busy, setBusy] = useState(false)
+
+  const minDate = dateInputFromToday(1)
+  const until = openEnded ? null : msFromDateInput(date)
+  const valid = openEnded || (until !== null && date >= minDate)
+
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true)
+    try { await fn() } finally { setBusy(false) }
+  }
+
+  const chip = (selected: boolean): React.CSSProperties => ({
+    padding: '7px 12px', borderRadius: 8, fontSize: 13, cursor: 'pointer',
+    border: selected ? `2px solid ${C.amber}` : `1px solid ${C.border}`,
+    background: selected ? C.amberBg : C.white,
+    color: selected ? C.amberInk : C.slate, fontWeight: selected ? 700 : 500,
+  })
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 20 }}>
+      <div style={{ background: C.white, borderRadius: 16, padding: 24, width: 380, maxWidth: '100%' }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: C.amberInk, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: 4 }}>
+          {existing ? 'Hall pass paused' : 'Pause hall pass'}
+        </div>
+        <h3 style={{ fontFamily: "'Fraunces', serif", fontSize: '1.4rem', color: C.ink, margin: '0 0 16px' }}>{name}</h3>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: 8 }}>Pass returns</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+          {PAUSE_PRESETS.map(p => {
+            const value = dateInputFromToday(p.days)
+            return (
+              <button key={p.label} onClick={() => { setOpenEnded(false); setDate(value) }} style={chip(!openEnded && date === value)}>
+                {p.label}
+              </button>
+            )
+          })}
+          <button onClick={() => setOpenEnded(true)} style={chip(openEnded)}>No end date</button>
+        </div>
+
+        {!openEnded && (
+          <input type="date" value={date} min={minDate} onChange={e => setDate(e.target.value)}
+            style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 14, color: C.ink, fontFamily: 'inherit', outline: 'none', marginBottom: 12 }} />
+        )}
+
+        <p style={{ fontSize: 13, color: C.slate, lineHeight: 1.5, margin: '0 0 20px' }}>
+          {!valid
+            ? 'Pick a return date after today.'
+            : until === null
+              ? `${name} can't check out on the scanner until you resume the pass.`
+              : `${name} can't check out on the scanner until ${holdLongLabel(until)}.`}
+        </p>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          {existing && (
+            <button onClick={() => run(onResume)} disabled={busy}
+              style={{ padding: '10px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.green, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+              Resume now
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button onClick={onCancel} disabled={busy}
+            style={{ padding: '10px 16px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.cloud, color: C.slate, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+            Cancel
+          </button>
+          <button onClick={() => run(() => onConfirm(until))} disabled={busy || !valid}
+            style={{ padding: '10px 18px', borderRadius: 8, border: 'none', background: C.ink, color: '#fff', fontSize: 14, fontWeight: 700, cursor: valid ? 'pointer' : 'default', opacity: busy || !valid ? 0.5 : 1 }}>
+            {existing ? 'Update' : 'Pause'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
 // ─── Period editor ────────────────────────────────────────────────────────────
 
-function PeriodEditor({ day, period, data, onBack, onSave }: {
+function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onResume }: {
   day: DayKey; period: PeriodNum; data?: RosterPeriod
+  /** Holds currently in effect for this period (expired ones already filtered out). */
+  holds: PassHold[]
   onBack: () => void; onSave: (d: RosterPeriod) => Promise<void>
+  onPause: (name: string, until: number | null) => Promise<void>
+  onResume: (name: string) => Promise<void>
 }) {
   const [className, setClassName] = useState(data?.name ?? '')
   const [students, setStudents] = useState<string[]>(data?.students ?? [])
   const [newName, setNewName] = useState('')
   const [csvPreview, setCsvPreview] = useState<{ names: string[]; warnings: string[] } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [pauseTarget, setPauseTarget] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const times = PERIOD_TIMES.find(p => p.period === period)!
+
+  // Pauses are saved the moment they're set — they live in their own Firebase
+  // node (see holds.ts), independent of this screen's Save/Cancel, which only
+  // covers the class name and student list.
+  const holdByName: Record<string, PassHold> = {}
+  holds.forEach(h => { holdByName[h.name] = h })
 
   const addStudent = () => {
     const trimmed = newName.trim()
@@ -365,6 +490,46 @@ function PeriodEditor({ day, period, data, onBack, onSave }: {
         </div>
       </div>
 
+      {/* Paused hall passes */}
+      {holds.length > 0 && (
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.amberBorder}`, padding: '1.25rem', marginBottom: '1rem' }}>
+          <label style={{ fontSize: 11, fontWeight: 700, color: C.amberInk, textTransform: 'uppercase', letterSpacing: '0.6px', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+            <PauseIcon /> Paused hall passes ({holds.length})
+          </label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {holds.map(h => {
+              const onRoster = students.includes(h.name)
+              return (
+                <div key={h.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 8, background: C.amberBg, fontSize: 13 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ fontWeight: 600, color: C.ink }}>{h.name}</span>
+                    <span style={{ color: C.slate }}> · {h.until === null ? 'no end date' : `until ${holdShortLabel(h.until)}`}</span>
+                    {!onRoster && (
+                      <div style={{ fontSize: 11, color: C.amberInk, marginTop: 2 }}>
+                        Not on this roster — if the name changed, remove this and pause the new name.
+                      </div>
+                    )}
+                  </div>
+                  {onRoster && (
+                    <button onClick={() => setPauseTarget(h.name)}
+                      style={{ padding: '4px 10px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.white, color: C.slate, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                      Change
+                    </button>
+                  )}
+                  <button onClick={() => onResume(h.name)}
+                    style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: C.greenBg, color: C.green, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                    {onRoster ? 'Resume' : 'Remove'}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 10, lineHeight: 1.5 }}>
+            Pauses save right away. They only block checking out on the scanner — a student already out can still check back in, and Mark Out on your dashboard still works.
+          </div>
+        </div>
+      )}
+
       {/* Roster */}
       <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, padding: '1.25rem', marginBottom: '1rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -408,13 +573,36 @@ function PeriodEditor({ day, period, data, onBack, onSave }: {
         {students.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '1.5rem', color: C.muted, fontSize: 14 }}>No students yet</div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 6 }}>
-            {students.map(name => (
-              <div key={name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', borderRadius: 7, border: `1px solid ${C.border}`, background: C.cloud, fontSize: 13, fontWeight: 500, color: C.ink }}>
-                <span>{name}</span>
-                <button onClick={() => removeStudent(name)} style={{ width: 18, height: 18, borderRadius: '50%', border: 'none', background: 'transparent', color: C.muted, cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>×</button>
-              </div>
-            ))}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 6 }}>
+            {students.map(name => {
+              const hold = holdByName[name]
+              return (
+                <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px 6px 10px', borderRadius: 7, border: `1px solid ${hold ? C.amberBorder : C.border}`, background: hold ? C.amberBg : C.cloud, fontSize: 13, fontWeight: 500, color: C.ink }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+                    {hold && (
+                      <div style={{ fontSize: 10, fontWeight: 600, color: C.amberInk, marginTop: 1 }}>
+                        {hold.until === null ? 'No end date' : `Until ${holdShortLabel(hold.until)}`}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => setPauseTarget(name)}
+                    title={hold ? 'Change or resume hall pass' : 'Pause hall pass'}
+                    aria-label={hold ? `Change or resume hall pass for ${name}` : `Pause hall pass for ${name}`}
+                    style={{ width: 22, height: 22, borderRadius: 5, border: 'none', background: hold ? C.amber : 'transparent', color: hold ? '#fff' : C.muted, cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <PauseIcon />
+                  </button>
+                  <button onClick={() => removeStudent(name)} aria-label={`Remove ${name}`}
+                    style={{ width: 18, height: 18, borderRadius: '50%', border: 'none', background: 'transparent', color: C.muted, cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>×</button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {students.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: C.muted, marginTop: 10 }}>
+            <PauseIcon size={10} /> pauses a student's hall pass &nbsp;·&nbsp; × removes them from the class
           </div>
         )}
       </div>
@@ -430,6 +618,16 @@ function PeriodEditor({ day, period, data, onBack, onSave }: {
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
+
+      {pauseTarget && (
+        <PauseDialog
+          name={pauseTarget}
+          existing={holdByName[pauseTarget] ?? null}
+          onCancel={() => setPauseTarget(null)}
+          onConfirm={async until => { await onPause(pauseTarget, until); setPauseTarget(null) }}
+          onResume={async () => { await onResume(pauseTarget); setPauseTarget(null) }}
+        />
+      )}
     </div>
   )
 }
@@ -445,10 +643,48 @@ export default function Editor() {
   const [roster, setRoster] = useState<RosterData>({})
   const [active, setActive] = useState<ActivePeriod | null>(null)
   const [saved, setSaved] = useState(false)
+  const [holds, setHolds] = useState<HoldsData>({})
 
   useEffect(() => {
     if (!teacherId) return
     return watchRoster(teacherId, setRoster)
+  }, [teacherId])
+
+  useEffect(() => {
+    if (!teacherId) return
+    return watchHolds(teacherId, setHolds, err => console.error('watchHolds failed', err))
+  }, [teacherId])
+
+  // Housekeeping: a pause whose return date has passed is already ignored
+  // everywhere (isHoldActive), but drop it from Firebase too so the node
+  // doesn't accumulate stale entries all year. The editor is the only screen
+  // that deletes holds, so this runs here rather than on the Scanner.
+  useEffect(() => {
+    if (!teacherId) return
+    const now = serverNow()
+    for (const [rosterKey, period] of Object.entries(holds)) {
+      for (const hold of Object.values(period)) {
+        if (!isHoldActive(hold, now)) clearHold(teacherId, rosterKey, hold.name).catch(() => {})
+      }
+    }
+  }, [holds, teacherId])
+
+  const handlePause = useCallback(async (rosterKey: string, name: string, until: number | null) => {
+    try {
+      await setHold(teacherId, rosterKey, name, until)
+    } catch (err) {
+      console.error('setHold failed', err)
+      alert("Couldn't save that pause. Check your connection and try again.")
+    }
+  }, [teacherId])
+
+  const handleResume = useCallback(async (rosterKey: string, name: string) => {
+    try {
+      await clearHold(teacherId, rosterKey, name)
+    } catch (err) {
+      console.error('clearHold failed', err)
+      alert("Couldn't resume that hall pass. Check your connection and try again.")
+    }
   }, [teacherId])
 
   const handleFullSave = useCallback(async (data: RosterData, mode: 'sync' | 'replace') => {
@@ -473,8 +709,11 @@ export default function Editor() {
       <div style={{ minHeight: '100vh', background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif" }}>
         <PeriodEditor
           day={active.day} period={active.period} data={roster[key]}
+          holds={activeHoldsFor(holds, key, serverNow())}
           onBack={() => { setActive(null); setScreen('main') }}
           onSave={async (data) => handlePeriodSave(active.day, active.period, data)}
+          onPause={(name, until) => handlePause(key, name, until)}
+          onResume={name => handleResume(key, name)}
         />
       </div>
     )
@@ -520,6 +759,7 @@ export default function Editor() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.75rem' }}>
               {periods.map(p => (
                 <PeriodCard key={p} day={day} period={p} data={roster[`${day}_${p}`]}
+                  pausedCount={activeHoldsFor(holds, `${day}_${p}`, serverNow()).length}
                   onClick={() => { setActive({ day, period: p }); setScreen('period') }} />
               ))}
             </div>

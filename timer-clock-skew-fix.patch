@@ -1,0 +1,164 @@
+From 047d6faf97bcebbe46316832536aeb670bfbc446 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 08:09:10 -0600
+Subject: [PATCH] Fix hall pass timers starting at non-zero time
+
+Timers subtracted Firebase server timestamps from the device clock
+(Date.now()), so any device with clock drift showed timers starting
+offset from 0:00 (or negative), and skewed durations/auto-resets.
+Add serverNow() using .info/serverTimeOffset and use it for all
+elapsed-time math; clamp fmt() at 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RDdXAeU5pq8VJQjaL6XnLp
+---
+ src/firebase/clock.ts   | 25 +++++++++++++++++++++++++
+ src/pages/Dashboard.tsx | 11 ++++++-----
+ src/pages/Scanner.tsx   |  7 ++++---
+ src/utils/schedule.ts   |  2 +-
+ 4 files changed, 36 insertions(+), 9 deletions(-)
+ create mode 100644 src/firebase/clock.ts
+
+diff --git a/src/firebase/clock.ts b/src/firebase/clock.ts
+new file mode 100644
+index 0000000..e14e905
+--- /dev/null
++++ b/src/firebase/clock.ts
+@@ -0,0 +1,25 @@
++/**
++ * Server-synced clock.
++ *
++ * outTimestamp / timestamp are written with serverTimestamp() (Firebase's
++ * clock), but elapsed-time math used to subtract them from Date.now() (the
++ * device's clock). On any iPad/Chromebook whose clock drifts, timers started
++ * at a non-zero value (or negative), and logged durations were skewed.
++ *
++ * Firebase publishes this device's offset from server time at
++ * .info/serverTimeOffset — use serverNow() anywhere a "now" is compared
++ * against a stored timestamp.
++ */
++import { ref, onValue } from 'firebase/database'
++import { db } from './config'
++
++let offsetMs = 0
++
++onValue(ref(db, '.info/serverTimeOffset'), snap => {
++  const v = snap.val()
++  offsetMs = typeof v === 'number' ? v : 0
++})
++
++export function serverNow(): number {
++  return Date.now() + offsetMs
++}
+diff --git a/src/pages/Dashboard.tsx b/src/pages/Dashboard.tsx
+index 854bda0..43ffc5e 100644
+--- a/src/pages/Dashboard.tsx
++++ b/src/pages/Dashboard.tsx
+@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
+ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+ import { ref, get } from 'firebase/database'
+ import { db } from '../firebase/config'
++import { serverNow } from '../firebase/clock'
+ import { scheduleStr, studentKey, writeManualAction, writeAutoReset, writeStaleReset } from '../firebase/writes'
+ import { useStudents } from '../hooks/useStudents'
+ import { useTodayLogs } from '../hooks/useLogs'
+@@ -135,7 +136,7 @@ function LongTripAlert({ students, onMarkIn }: {
+ }) {
+   const [dismissed, setDismissed] = useState<string[]>([])
+   const alertStudents = students.filter(s =>
+-    s.outTimestamp && Date.now() - s.outTimestamp > 600_000 && !dismissed.includes(s.name)
++    s.outTimestamp && serverNow() - s.outTimestamp > 600_000 && !dismissed.includes(s.name)
+   )
+   if (alertStudents.length === 0) return null
+ 
+@@ -232,7 +233,7 @@ export default function Dashboard() {
+     async function runResetSweep() {
+       const snap = await get(ref(db, 'students'))
+       const all = (snap.val() ?? {}) as Record<string, StudentRecord>
+-      const now = Date.now(); const today = todayStr()
++      const now = serverNow(); const today = todayStr()
+ 
+       // Stale sweep — reset any student still marked "out" from a previous
+       // calendar day, regardless of which period/class is currently selected
+@@ -283,7 +284,7 @@ export default function Dashboard() {
+     return m
+   }, [todayLogs, sched, period])
+ 
+-  const twelveHoursAgo = Date.now() - 12 * 60 * 60 * 1000
++  const twelveHoursAgo = serverNow() - 12 * 60 * 60 * 1000
+   const recentlyActiveSet = useMemo(() => {
+     const s = new Set<string>()
+     todayLogs.forEach(l => {
+@@ -324,7 +325,7 @@ export default function Dashboard() {
+       ).length
+       if (out >= MAX_OUT) { alert(`Max ${MAX_OUT} students out at a time`); return }
+     }
+-    const now = Date.now(); const today = todayStr()
++    const now = serverNow(); const today = todayStr()
+     await writeManualAction({
+       day, start, name, period: period!.name,
+       action: `manual-${action}` as 'manual-in' | 'manual-out',
+@@ -468,7 +469,7 @@ function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
+   compact?: boolean
+ }) {
+   void tick
+-  const elapsed = isOut && s.outTimestamp ? Date.now() - s.outTimestamp : 0
++  const elapsed = isOut && s.outTimestamp ? serverNow() - s.outTimestamp : 0
+   const over10 = elapsed > 600_000
+   const over5  = elapsed > 300_000
+ 
+diff --git a/src/pages/Scanner.tsx b/src/pages/Scanner.tsx
+index e384fcf..6dcd053 100644
+--- a/src/pages/Scanner.tsx
++++ b/src/pages/Scanner.tsx
+@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
+ import { useState, useEffect, useRef, useCallback } from 'react'
+ import { ref, onValue, off } from 'firebase/database'
+ import { db } from '../firebase/config'
++import { serverNow } from '../firebase/clock'
+ import { SCHEDULES } from '../data/schedules'
+ import { useRoster } from '../hooks/useRoster'
+ import { scheduleStr, writeStudentOut, writeStudentIn, writeAutoReset, writeStaleReset } from '../firebase/writes'
+@@ -179,7 +180,7 @@ export default function Scanner() {
+     const now = new Date()
+     const t = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0')
+     const periodOver = p ? t >= p.endTime : false
+-    const nowMs = Date.now()
++    const nowMs = serverNow()
+     const resetTime = nowMs
+     const today = todayStr()
+     const maxTripMs = maxTripMinutesRef.current * 60 * 1000
+@@ -276,7 +277,7 @@ export default function Scanner() {
+     if (!p || !name) return
+     isDragging.current = false
+ 
+-    const now = Date.now()
++    const now = serverNow()
+     const today = new Date().toISOString().split('T')[0]
+ 
+     // Dismiss the popup immediately — don't make the UI wait on a Firebase
+@@ -434,7 +435,7 @@ export default function Scanner() {
+                   <div style={{ fontSize: 10, fontWeight: 700, color: C.red, textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 8 }}>Students Out</div>
+                   <div style={{ display: 'grid', gridTemplateColumns: isIPadLandscape ? 'repeat(5, 1fr)' : isLargerThanIPad ? 'repeat(6, 1fr)' : 'repeat(3, 1fr)', gap: isIPadLandscape ? 10 : isLargerThanIPad ? 10 : 8 }}>
+                     {periodStudents.filter(n => outSet.has(n)).map(name => {
+-                      const elapsed = Date.now() - (outTimes[name] ?? Date.now())
++                      const elapsed = serverNow() - (outTimes[name] ?? serverNow())
+                       return (
+                         <button key={name} onClick={() => openSwipe(name)}
+                           style={{ border: `1.5px solid ${C.redBorder}`, background: C.redBg, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
+diff --git a/src/utils/schedule.ts b/src/utils/schedule.ts
+index 638252b..9246e00 100644
+--- a/src/utils/schedule.ts
++++ b/src/utils/schedule.ts
+@@ -18,7 +18,7 @@ export function buildStudentKey(day: ScheduleDay, start: StartType, name: string
+ }
+ 
+ export function fmt(ms: number): string {
+-  const s = Math.floor(ms / 1000)
++  const s = Math.max(0, Math.floor(ms / 1000))
+   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`
+ }
+ 
+-- 
+2.43.0
+

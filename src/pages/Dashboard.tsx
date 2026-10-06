@@ -7,6 +7,9 @@ import { useStudents } from '../hooks/useStudents'
 import { useTodayLogs } from '../hooks/useLogs'
 import { SCHEDULES } from '../data/schedules'
 import { useRoster } from '../hooks/useRoster'
+import { useHolds } from '../hooks/useHolds'
+import { getActiveHold, holdShortLabel } from '../firebase/holds'
+import type { PassHold } from '../firebase/holds'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
 import { fmtDuration, fmt, MAX_OUT, todayStr } from '../utils/schedule'
@@ -175,6 +178,8 @@ export default function Dashboard() {
   const { isWide, width } = useWindowSize()
   const allStudents = useStudents(teacherId)
   const { roster: firebaseRoster } = useRoster(teacherId)
+  // Paused hall passes, set in the roster editor (see holds.ts)
+  const holds = useHolds(teacherId)
   const todayLogs = useTodayLogs(teacherId)
   const [tick, setTick] = useState(0)
 
@@ -316,9 +321,10 @@ export default function Dashboard() {
         outTimestamp: rec?.outTimestamp ?? null,
         lastTrip: lastTripMap[name] ?? null,
         tripCount: tripCountMap[name] ?? 0,
+        hold: getActiveHold(holds, rosterKey_, name, serverNow()),
       }
     })
-  }, [allStudents, period, day, start, lastTripMap, tripCountMap, recentlyActiveSet, periodStudents])
+  }, [allStudents, period, day, start, lastTripMap, tripCountMap, recentlyActiveSet, periodStudents, holds, rosterKey_])
 
   const relevantLogs = todayLogs.filter(l =>
     ['in', 'manual-in', 'auto-reset'].includes(l.action) &&
@@ -332,6 +338,15 @@ export default function Dashboard() {
         s => s.status === 'out' && s.period === period?.name && s.schedule === sched
       ).length
       if (out >= MAX_OUT) { alert(`Max ${MAX_OUT} students out at a time`); return }
+      // A paused pass only blocks the student's own Scanner checkout. Mark Out
+      // here is the teacher's deliberate override (an emergency, a nurse
+      // visit) — it just asks first so it can't happen by a stray tap. The
+      // pause itself stays in place afterwards.
+      const hold = getActiveHold(holds, rosterKey_, name, serverNow())
+      if (hold) {
+        const when = hold.until === null ? 'with no end date' : `until ${holdShortLabel(hold.until)}`
+        if (!confirm(`${name}'s hall pass is paused ${when}. Mark out anyway?`)) return
+      }
     }
     const now = serverNow(); const today = todayStr()
     await writeManualAction({
@@ -339,7 +354,7 @@ export default function Dashboard() {
       action: `manual-${action}` as 'manual-in' | 'manual-out',
       outStart: outTimestamp, inTime: action === 'in' ? now : null, now, date: today,
     })
-  }, [allStudents, period, sched, day, start, teacherId])
+  }, [allStudents, period, sched, day, start, teacherId, holds, rosterKey_])
 
   // Sort out students: longest out first
   const studentsOut = roster
@@ -471,7 +486,7 @@ export default function Dashboard() {
 // ─── Student Tile ─────────────────────────────────────────────────────────────
 
 function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
-  s: { name: string; status: 'in' | 'out'; hasScanned: boolean; outTimestamp: number | null; lastTrip: number | null; tripCount: number }
+  s: { name: string; status: 'in' | 'out'; hasScanned: boolean; outTimestamp: number | null; lastTrip: number | null; tripCount: number; hold: PassHold | null }
   isPeriodActive: boolean
   onAction: (name: string, action: 'in' | 'out', outTimestamp: number | null) => void
   tick: number
@@ -482,12 +497,22 @@ function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
   const elapsed = isOut && s.outTimestamp ? serverNow() - s.outTimestamp : 0
   const over10 = elapsed > 600_000
   const over5  = elapsed > 300_000
+  const pausedLabel = s.hold
+    ? (s.hold.until === null ? 'Pass paused' : `Pass paused until ${holdShortLabel(s.hold.until)}`)
+    : null
 
   // Compact (not-scanned) tile — just name + mark out
   if (compact) {
     return (
       <div style={{ borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, padding: '8px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontWeight: 500, fontSize: 13, color: C.slate }}>{s.name}</span>
+        <span style={{ fontWeight: 500, fontSize: 13, color: C.slate, minWidth: 0 }}>
+          {s.name}
+          {pausedLabel && (
+            <span title={pausedLabel} style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, padding: '2px 5px', borderRadius: 4, letterSpacing: '0.5px', background: 'rgba(245,158,11,0.15)', color: '#b45309', whiteSpace: 'nowrap' }}>
+              PAUSED
+            </span>
+          )}
+        </span>
         {isPeriodActive && (
           <button onClick={() => onAction(s.name, 'out', s.outTimestamp)}
             style={{ padding: '2px 8px', borderRadius: 5, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: 'rgba(239,68,68,0.08)', color: C.red }}>
@@ -534,6 +559,11 @@ function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
         }}>
           {fmt(elapsed)}
         </div>
+      )}
+
+      {/* Paused hall pass — set in the roster editor */}
+      {pausedLabel && (
+        <div style={{ fontSize: 11, fontWeight: 600, color: '#b45309', marginBottom: 6 }}>{pausedLabel}</div>
       )}
 
       {/* Last trip info for in students */}

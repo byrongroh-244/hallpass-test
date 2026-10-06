@@ -4,6 +4,8 @@ import { ref, onValue, off } from 'firebase/database'
 import { db } from '../firebase/config'
 import { SCHEDULES } from '../data/schedules'
 import { useRoster } from '../hooks/useRoster'
+import { useHolds } from '../hooks/useHolds'
+import { getActiveHold, holdLongLabel } from '../firebase/holds'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
 import { scheduleStr, writeStudentOut, writeStudentIn, writeAutoReset, writeStaleReset } from '../firebase/writes'
@@ -67,7 +69,9 @@ export default function Scanner() {
   const [pickStart, setPickStart] = useState<StartType>('regular')
   const [pickPeriod, setPickPeriod] = useState<string>('')
   const navigate = useNavigate()
-  const [errorPopup, setErrorPopup] = useState<{ type: 'maxOut' | 'notActive' } | null>(null)
+  const [errorPopup, setErrorPopup] = useState<
+    { type: 'maxOut' | 'notActive' } | { type: 'paused'; name: string; until: number | null } | null
+  >(null)
   const [pinTarget, setPinTarget] = useState<'home' | 'confirm' | null>(null)
   const [pinDigits, setPinDigits] = useState(['','','',''])
   const [pinError, setPinError] = useState(false)
@@ -103,6 +107,8 @@ export default function Scanner() {
 
   const { isIPadLandscape, isLargerThanIPad } = useWindowSize()
   const { roster } = useRoster(teacherId)
+  // Paused hall passes, set by the teacher in the roster editor (see holds.ts)
+  const holds = useHolds(teacherId)
   const allPeriods = SCHEDULES[day][start]
   const periods = allPeriods.filter(p => {
     const num = p.name.match(/\d+/)?.[0] ?? ''
@@ -303,6 +309,13 @@ export default function Scanner() {
       const t = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0')
       const active = t >= period.startTime && t < period.endTime
       if (!active) { setErrorPopup({ type: 'notActive' }); return }
+      // Teacher has paused this student's pass (roster editor). Like the two
+      // checks around it, this only gates a NEW checkout — it sits inside
+      // `!isOut` on purpose, so a student whose pass gets paused while they're
+      // already in the hall can still slide back in. Checked before capacity
+      // so a paused student is told the real reason rather than "class is full".
+      const hold = getActiveHold(holds, rosterKey_, name, serverNow())
+      if (hold) { setErrorPopup({ type: 'paused', name, until: hold.until }); return }
       // Check capacity only when checking OUT (not checking back in)
       if (outSet.size >= maxOut) { setErrorPopup({ type: 'maxOut' }); return }
     }
@@ -713,6 +726,27 @@ export default function Scanner() {
             <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: '1.3rem', color: C.ink, margin: '0 0 10px' }}>Class is at capacity</h2>
             <p style={{ fontSize: 14, color: C.slate, margin: '0 0 24px', lineHeight: 1.6 }}>
               The maximum number of students is already out. Please wait for someone to return before leaving.
+            </p>
+            <button onClick={() => setErrorPopup(null)}
+              style={{ width: '100%', padding: '12px 0', borderRadius: 10, border: 'none', background: C.ink, color: '#fff', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
+              OK
+            </button>
+          </div>
+        </Overlay>
+      )}
+
+      {errorPopup?.type === 'paused' && (
+        <Overlay>
+          <div style={{ background: C.white, borderRadius: 16, padding: '28px 24px', width: isIPadLandscape ? 380 : 320, textAlign: 'center' }}>
+            <div style={{ width: 52, height: 52, borderRadius: '50%', background: 'rgba(245,158,11,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <svg width="26" height="26" fill="none" stroke="#f59e0b" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            </div>
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: '1.3rem', color: C.ink, margin: '0 0 6px' }}>Hall pass paused</h2>
+            <div style={{ fontSize: 15, fontWeight: 600, color: C.slate, marginBottom: 10 }}>{errorPopup.name}</div>
+            <p style={{ fontSize: 14, color: C.slate, margin: '0 0 24px', lineHeight: 1.6 }}>
+              {errorPopup.until === null
+                ? 'Your hall pass is on pause. Please see your teacher if you need to leave the room.'
+                : `Your hall pass is on pause until ${holdLongLabel(errorPopup.until)}. Please see your teacher if you need to leave the room.`}
             </p>
             <button onClick={() => setErrorPopup(null)}
               style={{ width: '100%', padding: '12px 0', borderRadius: 10, border: 'none', background: C.ink, color: '#fff', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
