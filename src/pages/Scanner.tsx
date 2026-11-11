@@ -1,10 +1,13 @@
 import { useNavigate, useParams } from 'react-router-dom'
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { ref, onValue, off } from 'firebase/database'
 import { db } from '../firebase/config'
 import { SCHEDULES } from '../data/schedules'
 import { useRoster } from '../hooks/useRoster'
 import { useHolds } from '../hooks/useHolds'
+import { useTodayLogs } from '../hooks/useLogs'
+import { useTimeLimits } from '../hooks/useTimeLimits'
+import { finishedMsByStudent, budgetLevel, BUDGET_COLORS } from '../firebase/timeLimits'
 import { getActiveHold, holdLongLabel } from '../firebase/holds'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
@@ -70,7 +73,8 @@ export default function Scanner() {
   const [pickPeriod, setPickPeriod] = useState<string>('')
   const navigate = useNavigate()
   const [errorPopup, setErrorPopup] = useState<
-    { type: 'maxOut' | 'notActive' } | { type: 'paused'; name: string; until: number | null } | null
+    { type: 'maxOut' | 'notActive' } | { type: 'paused'; name: string; until: number | null }
+    | { type: 'timeUp'; name: string; minutes: number } | null
   >(null)
   const [pinTarget, setPinTarget] = useState<'home' | 'confirm' | null>(null)
   const [pinDigits, setPinDigits] = useState(['','','',''])
@@ -124,6 +128,18 @@ export default function Scanner() {
   const periodStudents: string[] = firebaseHasRoster
     ? (rosterEntry?.students ?? [])           // Firebase has been set up — use it (even if empty)
     : (period?.students ?? [])                 // Firebase empty — fall back to schedules.ts
+
+  // Hall time limit for this class (Roster Editor → "Hall time limit"). When
+  // set, every tile fills up as the student's total time out today grows —
+  // finished trips from the logs plus the live trip they're on right now.
+  const timeLimits = useTimeLimits(teacherId)
+  const todayLogs = useTodayLogs(teacherId)
+  const timeLimit = rosterKey_ ? timeLimits[rosterKey_] : undefined
+  const periodNameForBudget = period?.name ?? ''
+  const finishedMs = useMemo(
+    () => (timeLimit ? finishedMsByStudent(todayLogs, day, periodNameForBudget) : {}),
+    [timeLimit, todayLogs, day, periodNameForBudget]
+  )
 
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 1000); return () => clearInterval(id) }, [])
 
@@ -293,6 +309,18 @@ export default function Scanner() {
     setScreen('main')
   }
 
+  /** Total hall time today in this class, including a trip in progress. */
+  const usedMs = (name: string): number =>
+    (finishedMs[name] ?? 0) + (outTimes[name] !== undefined ? Math.max(0, serverNow() - outTimes[name]) : 0)
+
+  /** Fill style for a tile, or null when this class has no time limit. */
+  const budgetFor = (name: string) => {
+    if (!timeLimit) return null
+    const fraction = usedMs(name) / (timeLimit.minutes * 60000)
+    const level = budgetLevel(fraction)
+    return { pct: Math.min(100, fraction * 100), level, colors: BUDGET_COLORS[level] }
+  }
+
   const openSwipe = (name: string) => {
     const isOut = outSet.has(name)
     if (!period) { setErrorPopup({ type: 'notActive' }); return }
@@ -316,6 +344,11 @@ export default function Scanner() {
       // so a paused student is told the real reason rather than "class is full".
       const hold = getActiveHold(holds, rosterKey_, name, serverNow())
       if (hold) { setErrorPopup({ type: 'paused', name, until: hold.until }); return }
+      // Hall time limit set to "block" and they've used it all today. Same
+      // placement as the pause check: only a new checkout is stopped.
+      if (timeLimit?.block && usedMs(name) >= timeLimit.minutes * 60000) {
+        setErrorPopup({ type: 'timeUp', name, minutes: timeLimit.minutes }); return
+      }
       // Check capacity only when checking OUT (not checking back in)
       if (outSet.size >= maxOut) { setErrorPopup({ type: 'maxOut' }); return }
     }
@@ -494,15 +527,22 @@ export default function Scanner() {
                   <div style={{ display: 'grid', gridTemplateColumns: isIPadLandscape ? 'repeat(5, 1fr)' : isLargerThanIPad ? 'repeat(6, 1fr)' : 'repeat(3, 1fr)', gap: isIPadLandscape ? 10 : isLargerThanIPad ? 10 : 8 }}>
                     {periodStudents.filter(n => outSet.has(n)).map((name, i) => {
                       const elapsed = serverNow() - (outTimes[name] ?? serverNow())
+                      const budget = budgetFor(name)
                       return (
                         <button key={`${i}-${name}`} onClick={() => openSwipe(name)}
-                          style={{ border: `1.5px solid ${C.redBorder}`, background: C.redBg, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
+                          style={{ position: 'relative', overflow: 'hidden', border: `1.5px solid ${C.redBorder}`, background: C.redBg, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
                           onMouseDown={e => (e.currentTarget.style.transform = 'scale(0.94)')}
                           onMouseUp={e => (e.currentTarget.style.transform = '')}
                           onMouseLeave={e => (e.currentTarget.style.transform = '')}
                         >
                           <div style={{ fontSize: isLargerThanIPad ? 16 : isIPadLandscape ? 15 : 12, fontWeight: 600, color: '#b91c1c', marginBottom: 4 }}>{name}</div>
                           <div style={{ fontSize: isLargerThanIPad ? 15 : isIPadLandscape ? 14 : 12, fontWeight: 700, color: C.red, fontVariantNumeric: 'tabular-nums' }}>{fmt(elapsed)}</div>
+                          {budget && (
+                            // Daily hall time used, growing live while they're out
+                            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 5, background: 'rgba(239,68,68,0.12)' }}>
+                              <div style={{ height: '100%', width: `${budget.pct}%`, background: budget.level === 'full' ? C.red : budget.level === 'high' ? '#f59e0b' : C.green, transition: 'width 1s linear' }} />
+                            </div>
+                          )}
                         </button>
                       )
                     })}
@@ -514,16 +554,29 @@ export default function Scanner() {
               <div>
                 <div style={{ fontSize: 10, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 8 }}>Tap your name</div>
                 <div style={{ display: 'grid', gridTemplateColumns: isIPadLandscape ? 'repeat(5, 1fr)' : isLargerThanIPad ? 'repeat(6, 1fr)' : 'repeat(3, 1fr)', gap: isIPadLandscape ? 10 : isLargerThanIPad ? 10 : 8 }}>
-                  {periodStudents.filter(n => !outSet.has(n)).map((name, i) => (
+                  {periodStudents.filter(n => !outSet.has(n)).map((name, i) => {
+                    // With a hall time limit on, the tile itself is the meter:
+                    // it fills left to right as today's time out adds up.
+                    const budget = budgetFor(name)
+                    return (
                     <button key={`${i}-${name}`} onClick={() => openSwipe(name)}
-                      style={{ border: `1px solid ${C.border}`, background: C.white, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
+                      style={{ position: 'relative', overflow: 'hidden', border: `${budget && budget.level !== 'low' ? 1.5 : 1}px solid ${budget ? budget.colors.border : C.border}`, background: C.white, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
                       onMouseDown={e => (e.currentTarget.style.transform = 'scale(0.94)')}
                       onMouseUp={e => (e.currentTarget.style.transform = '')}
                       onMouseLeave={e => (e.currentTarget.style.transform = '')}
                     >
-                      <div style={{ fontSize: isLargerThanIPad ? 16 : isIPadLandscape ? 15 : 12, fontWeight: 600, color: C.ink }}>{name}</div>
+                      {budget && budget.pct > 0 && (
+                        <div style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: `${budget.pct}%`, background: budget.colors.fill, transition: 'width 0.6s ease' }} />
+                      )}
+                      <div style={{ position: 'relative', fontSize: isLargerThanIPad ? 16 : isIPadLandscape ? 15 : 12, fontWeight: 600, color: budget ? budget.colors.ink : C.ink }}>{name}</div>
+                      {budget?.level === 'full' && (
+                        <div style={{ position: 'relative', fontSize: isLargerThanIPad ? 12 : 11, fontWeight: 600, color: budget.colors.sub, marginTop: 3 }}>
+                          {timeLimit?.block ? 'No time left' : 'Time used up'}
+                        </div>
+                      )}
                     </button>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             </>
@@ -747,6 +800,25 @@ export default function Scanner() {
               {errorPopup.until === null
                 ? 'Your hall pass is on pause. Please see your teacher if you need to leave the room.'
                 : `Your hall pass is on pause until ${holdLongLabel(errorPopup.until)}. Please see your teacher if you need to leave the room.`}
+            </p>
+            <button onClick={() => setErrorPopup(null)}
+              style={{ width: '100%', padding: '12px 0', borderRadius: 10, border: 'none', background: C.ink, color: '#fff', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
+              OK
+            </button>
+          </div>
+        </Overlay>
+      )}
+
+      {errorPopup?.type === 'timeUp' && (
+        <Overlay>
+          <div style={{ background: C.white, borderRadius: 16, padding: '28px 24px', width: isIPadLandscape ? 380 : 320, textAlign: 'center' }}>
+            <div style={{ width: 52, height: 52, borderRadius: '50%', background: C.redBg, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <svg width="26" height="26" fill="none" stroke={C.red} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            </div>
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: '1.3rem', color: C.ink, margin: '0 0 6px' }}>Hall time used up</h2>
+            <div style={{ fontSize: 15, fontWeight: 600, color: C.slate, marginBottom: 10 }}>{errorPopup.name}</div>
+            <p style={{ fontSize: 14, color: C.slate, margin: '0 0 24px', lineHeight: 1.6 }}>
+              You've used your {errorPopup.minutes} minutes of hall time for this class today. Please see your teacher if you need to leave the room.
             </p>
             <button onClick={() => setErrorPopup(null)}
               style={{ width: '100%', padding: '12px 0', borderRadius: 10, border: 'none', background: C.ink, color: '#fff', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>

@@ -8,6 +8,9 @@ import { useTodayLogs } from '../hooks/useLogs'
 import { SCHEDULES } from '../data/schedules'
 import { useRoster } from '../hooks/useRoster'
 import { useHolds } from '../hooks/useHolds'
+import { useTimeLimits } from '../hooks/useTimeLimits'
+import { finishedMsByStudent, budgetLevel, budgetLabel, BUDGET_COLORS } from '../firebase/timeLimits'
+import type { TimeLimit } from '../firebase/timeLimits'
 import { getActiveHold, holdShortLabel } from '../firebase/holds'
 import type { PassHold } from '../firebase/holds'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
@@ -181,6 +184,8 @@ export default function Dashboard() {
   // Paused hall passes, set in the roster editor (see holds.ts)
   const holds = useHolds(teacherId)
   const todayLogs = useTodayLogs(teacherId)
+  // Per-class hall time limits, set in the roster editor (see timeLimits.ts)
+  const timeLimits = useTimeLimits(teacherId)
   const [tick, setTick] = useState(0)
 
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 1000); return () => clearInterval(id) }, [])
@@ -306,6 +311,12 @@ export default function Dashboard() {
     return s
   }, [todayLogs, sched, period, twelveHoursAgo])
 
+  const timeLimit: TimeLimit | null = (rosterKey_ && timeLimits[rosterKey_]) || null
+  const finishedMs = useMemo(
+    () => (timeLimit && period ? finishedMsByStudent(todayLogs, day, period.name) : {}),
+    [timeLimit, todayLogs, day, period]
+  )
+
   const roster = useMemo(() => {
     if (!period) return []
     return periodStudents.map(name => {
@@ -322,9 +333,10 @@ export default function Dashboard() {
         lastTrip: lastTripMap[name] ?? null,
         tripCount: tripCountMap[name] ?? 0,
         hold: getActiveHold(holds, rosterKey_, name, serverNow()),
+        finishedMs: finishedMs[name] ?? 0,
       }
     })
-  }, [allStudents, period, day, start, lastTripMap, tripCountMap, recentlyActiveSet, periodStudents, holds, rosterKey_])
+  }, [allStudents, period, day, start, lastTripMap, tripCountMap, recentlyActiveSet, periodStudents, holds, rosterKey_, finishedMs])
 
   const relevantLogs = todayLogs.filter(l =>
     ['in', 'manual-in', 'auto-reset'].includes(l.action) &&
@@ -347,6 +359,10 @@ export default function Dashboard() {
         const when = hold.until === null ? 'with no end date' : `until ${holdShortLabel(hold.until)}`
         if (!confirm(`${name}'s hall pass is paused ${when}. Mark out anyway?`)) return
       }
+      // Same override for a used-up hall time limit (block mode).
+      else if (timeLimit?.block && (finishedMs[name] ?? 0) >= timeLimit.minutes * 60000) {
+        if (!confirm(`${name} has used all ${timeLimit.minutes} minutes of hall time for this class today. Mark out anyway?`)) return
+      }
     }
     const now = serverNow(); const today = todayStr()
     await writeManualAction({
@@ -354,7 +370,7 @@ export default function Dashboard() {
       action: `manual-${action}` as 'manual-in' | 'manual-out',
       outStart: outTimestamp, inTime: action === 'in' ? now : null, now, date: today,
     })
-  }, [allStudents, period, sched, day, start, teacherId, holds, rosterKey_])
+  }, [allStudents, period, sched, day, start, teacherId, holds, rosterKey_, timeLimit, finishedMs])
 
   // Sort out students: longest out first
   const studentsOut = roster
@@ -453,7 +469,7 @@ export default function Dashboard() {
             <>
               <SectionDivider label="Currently Out" count={studentsOut.length} accent={C.red} />
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '0.75rem' }}>
-                {studentsOut.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut />)}
+                {studentsOut.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} timeLimit={timeLimit} isOut />)}
               </div>
             </>
           )}
@@ -463,7 +479,7 @@ export default function Dashboard() {
             <>
               <SectionDivider label={studentsOut.length > 0 ? 'Returned' : 'In Class'} count={studentsIn.length} accent={C.green} />
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '0.75rem' }}>
-                {studentsIn.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut={false} />)}
+                {studentsIn.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} timeLimit={timeLimit} isOut={false} />)}
               </div>
             </>
           )}
@@ -485,8 +501,9 @@ export default function Dashboard() {
 
 // ─── Student Tile ─────────────────────────────────────────────────────────────
 
-function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
-  s: { name: string; status: 'in' | 'out'; hasScanned: boolean; outTimestamp: number | null; lastTrip: number | null; tripCount: number; hold: PassHold | null }
+function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact, timeLimit }: {
+  s: { name: string; status: 'in' | 'out'; hasScanned: boolean; outTimestamp: number | null; lastTrip: number | null; tripCount: number; hold: PassHold | null; finishedMs: number }
+  timeLimit?: TimeLimit | null
   isPeriodActive: boolean
   onAction: (name: string, action: 'in' | 'out', outTimestamp: number | null) => void
   tick: number
@@ -497,6 +514,15 @@ function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
   const elapsed = isOut && s.outTimestamp ? serverNow() - s.outTimestamp : 0
   const over10 = elapsed > 600_000
   const over5  = elapsed > 300_000
+  // Hall time used today in this class — finished trips + the live one
+  const budget = timeLimit
+    ? (() => {
+        const used = s.finishedMs + elapsed
+        const fraction = used / (timeLimit.minutes * 60000)
+        const level = budgetLevel(fraction)
+        return { used, pct: Math.min(100, fraction * 100), level, colors: BUDGET_COLORS[level] }
+      })()
+    : null
   const pausedLabel = s.hold
     ? (s.hold.until === null ? 'Pass paused' : `Pass paused until ${holdShortLabel(s.hold.until)}`)
     : null
@@ -564,6 +590,19 @@ function StudentTile({ s, isPeriodActive, onAction, tick, isOut, compact }: {
       {/* Paused hall pass — set in the roster editor */}
       {pausedLabel && (
         <div style={{ fontSize: 11, fontWeight: 600, color: '#b45309', marginBottom: 6 }}>{pausedLabel}</div>
+      )}
+
+      {/* Hall time limit meter */}
+      {budget && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 600, color: budget.level === 'low' ? C.slate : budget.colors.sub, marginBottom: 3 }}>
+            <span>{budgetLabel(budget.used, timeLimit!.minutes)}</span>
+            {budget.level === 'full' && <span>{timeLimit!.block ? 'Blocked' : 'Used up'}</span>}
+          </div>
+          <div style={{ height: 6, borderRadius: 3, background: C.cloud, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${budget.pct}%`, borderRadius: 3, background: budget.level === 'full' ? C.red : budget.level === 'high' ? C.amber : C.green, transition: 'width 1s linear' }} />
+          </div>
+        </div>
       )}
 
       {/* Last trip info for in students */}

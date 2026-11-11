@@ -8,6 +8,9 @@ import type { RosterData, DayKey, PeriodNum, RosterPeriod, ExcelParseResult } fr
 import { watchHolds, setHold, clearHold, activeHoldsFor, isHoldActive, holdShortLabel } from '../firebase/holds'
 import type { HoldsData, PassHold } from '../firebase/holds'
 import { serverNow } from '../firebase/clock'
+import { setTimeLimit, clearTimeLimit, TIME_LIMIT_CHOICES, DEFAULT_TIME_LIMIT } from '../firebase/timeLimits'
+import type { TimeLimit } from '../firebase/timeLimits'
+import { useTimeLimits } from '../hooks/useTimeLimits'
 import { PERIOD_TIMES, fmt12 } from '../data/periods'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
@@ -240,10 +243,87 @@ function ExcelUpload({ roster, onConfirm }: {
   )
 }
 
+// ─── Hall time limit ──────────────────────────────────────────────────────────
+
+function ClockIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  )
+}
+
+/**
+ * Per-class daily hall time budget (see timeLimits.ts). Saves the moment it's
+ * changed, like pauses — it's not part of this screen's Save/Cancel.
+ */
+function TimeLimitSection({ limit, onChange }: {
+  limit: TimeLimit | null
+  onChange: (limit: TimeLimit | null) => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const apply = async (next: TimeLimit | null) => {
+    setBusy(true)
+    try { await onChange(next) } finally { setBusy(false) }
+  }
+  const on = limit !== null
+  const seg = (active: boolean): React.CSSProperties => ({
+    flex: 1, height: 40, borderRadius: 8, fontSize: 13, cursor: 'pointer',
+    border: active ? `2px solid ${C.green}` : `1px solid ${C.border}`,
+    background: active ? C.greenBg : C.white, color: active ? '#065f46' : C.slate,
+    fontWeight: active ? 700 : 500,
+  })
+
+  return (
+    <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${on ? 'rgba(16,185,129,0.4)' : C.border}`, padding: '1.25rem', marginBottom: '1rem', opacity: busy ? 0.7 : 1 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: on ? '#047857' : C.muted, textTransform: 'uppercase', letterSpacing: '0.6px', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <ClockIcon size={12} /> Hall time limit
+          </label>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4, lineHeight: 1.5 }}>
+            Adds up every trip a student takes in this class each day. Their tile fills as they use it.
+          </div>
+        </div>
+        <button role="switch" aria-checked={on} aria-label="Hall time limit" disabled={busy}
+          onClick={() => apply(on ? null : { minutes: DEFAULT_TIME_LIMIT, block: false })}
+          style={{ width: 46, height: 26, borderRadius: 13, border: 'none', background: on ? C.green : '#cbd5e1', position: 'relative', cursor: 'pointer', flexShrink: 0, padding: 0, transition: 'background 0.15s' }}>
+          <span style={{ position: 'absolute', top: 3, left: on ? 23 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left 0.15s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
+        </button>
+      </div>
+
+      {on && (
+        <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: C.slate, marginBottom: 8 }}>Minutes per day in this class</div>
+            <select value={limit.minutes} disabled={busy}
+              onChange={e => apply({ ...limit, minutes: Number(e.target.value) })}
+              style={{ width: '100%', height: 40, padding: '0 10px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 14, color: C.ink, background: C.white, fontFamily: 'inherit' }}>
+              {TIME_LIMIT_CHOICES.map(n => <option key={n} value={n}>{n} minutes</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: C.slate, marginBottom: 8 }}>When a student uses it all</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button disabled={busy} onClick={() => apply({ ...limit, block: false })} style={seg(!limit.block)}>Show only</button>
+              <button disabled={busy} onClick={() => apply({ ...limit, block: true })} style={seg(limit.block)}>Block checkout</button>
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 8, lineHeight: 1.5 }}>
+              {limit.block
+                ? "The scanner won't let them check out again in this class today. A student already out can still check back in, and Mark Out on your dashboard still works."
+                : 'Their tile turns red, but they can still check out.'}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Period card ──────────────────────────────────────────────────────────────
 
-function PeriodCard({ day, period, data, pausedCount, onClick }: {
-  day: DayKey; period: PeriodNum; data?: RosterPeriod; pausedCount: number; onClick: () => void
+function PeriodCard({ day, period, data, pausedCount, timeLimit, onClick }: {
+  day: DayKey; period: PeriodNum; data?: RosterPeriod; pausedCount: number; timeLimit?: TimeLimit; onClick: () => void
 }) {
   const times = PERIOD_TIMES.find(p => p.period === period)!
   const hasClass = !!(data?.name?.trim())
@@ -277,6 +357,11 @@ function PeriodCard({ day, period, data, pausedCount, onClick }: {
           <PauseIcon size={11} /> {pausedCount} hall pass{pausedCount === 1 ? '' : 'es'} paused
         </div>
       )}
+      {timeLimit && hasClass && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, fontSize: 11, fontWeight: 600, color: '#047857' }}>
+          <ClockIcon size={11} /> {timeLimit.minutes} min hall time · {timeLimit.block ? 'blocks when used up' : 'show only'}
+        </div>
+      )}
       {dupCount > 0 && (
         <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, color: C.red }}>
           ⚠ Duplicate student name — open to fix
@@ -288,8 +373,10 @@ function PeriodCard({ day, period, data, pausedCount, onClick }: {
 
 // ─── Period editor ────────────────────────────────────────────────────────────
 
-function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onResume }: {
+function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack, onSave, onPause, onResume }: {
   day: DayKey; period: PeriodNum; data?: RosterPeriod
+  timeLimit: TimeLimit | null
+  onTimeLimit: (limit: TimeLimit | null) => Promise<void>
   /** Holds currently in effect for this period (expired ones already filtered out). */
   holds: PassHold[]
   onBack: () => void; onSave: (d: RosterPeriod) => Promise<void>
@@ -395,6 +482,9 @@ function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onRes
           Regular {fmt12(times.regular.start)}–{fmt12(times.regular.end)} · Late {fmt12(times.late.start)}–{fmt12(times.late.end)}
         </div>
       </div>
+
+      {/* Hall time limit — saves immediately */}
+      <TimeLimitSection limit={timeLimit} onChange={onTimeLimit} />
 
       {/* Paused hall passes */}
       {holds.length > 0 && (
@@ -590,6 +680,8 @@ export default function Editor() {
     if (searchParams.has('period')) setSearchParams({}, { replace: true })
   }, [searchParams, setSearchParams])
 
+  const timeLimits = useTimeLimits(teacherId)
+
   useEffect(() => {
     if (!teacherId) return
     return watchHolds(teacherId, setHolds, err => console.error('watchHolds failed', err))
@@ -658,6 +750,11 @@ export default function Editor() {
         <PeriodEditor
           day={active.day} period={active.period} data={roster[key]}
           holds={activeHoldsFor(holds, key, serverNow())}
+          timeLimit={timeLimits[key] ?? null}
+          onTimeLimit={async limit => {
+            if (limit) await setTimeLimit(teacherId, key, limit)
+            else await clearTimeLimit(teacherId, key)
+          }}
           onBack={closePeriod}
           onSave={async (data) => handlePeriodSave(active.day, active.period, data)}
           onPause={(name, until) => handlePause(key, name, until)}
@@ -708,6 +805,7 @@ export default function Editor() {
               {periods.map(p => (
                 <PeriodCard key={p} day={day} period={p} data={roster[`${day}_${p}`]}
                   pausedCount={activeHoldsFor(holds, `${day}_${p}`, serverNow()).length}
+                  timeLimit={timeLimits[`${day}_${p}`]}
                   onClick={() => { setActive({ day, period: p }); setScreen('period') }} />
               ))}
             </div>
