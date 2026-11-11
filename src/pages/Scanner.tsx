@@ -492,10 +492,10 @@ export default function Scanner() {
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: C.red, textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 8 }}>Students Out</div>
                   <div style={{ display: 'grid', gridTemplateColumns: isIPadLandscape ? 'repeat(5, 1fr)' : isLargerThanIPad ? 'repeat(6, 1fr)' : 'repeat(3, 1fr)', gap: isIPadLandscape ? 10 : isLargerThanIPad ? 10 : 8 }}>
-                    {periodStudents.filter(n => outSet.has(n)).map(name => {
+                    {periodStudents.filter(n => outSet.has(n)).map((name, i) => {
                       const elapsed = serverNow() - (outTimes[name] ?? serverNow())
                       return (
-                        <button key={name} onClick={() => openSwipe(name)}
+                        <button key={`${i}-${name}`} onClick={() => openSwipe(name)}
                           style={{ border: `1.5px solid ${C.redBorder}`, background: C.redBg, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
                           onMouseDown={e => (e.currentTarget.style.transform = 'scale(0.94)')}
                           onMouseUp={e => (e.currentTarget.style.transform = '')}
@@ -514,8 +514,8 @@ export default function Scanner() {
               <div>
                 <div style={{ fontSize: 10, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 8 }}>Tap your name</div>
                 <div style={{ display: 'grid', gridTemplateColumns: isIPadLandscape ? 'repeat(5, 1fr)' : isLargerThanIPad ? 'repeat(6, 1fr)' : 'repeat(3, 1fr)', gap: isIPadLandscape ? 10 : isLargerThanIPad ? 10 : 8 }}>
-                  {periodStudents.filter(n => !outSet.has(n)).map(name => (
-                    <button key={name} onClick={() => openSwipe(name)}
+                  {periodStudents.filter(n => !outSet.has(n)).map((name, i) => (
+                    <button key={`${i}-${name}`} onClick={() => openSwipe(name)}
                       style={{ border: `1px solid ${C.border}`, background: C.white, borderRadius: 10, padding: isLargerThanIPad ? '20px 10px' : isIPadLandscape ? '12px 8px' : '10px 6px', textAlign: 'center', cursor: 'pointer' }}
                       onMouseDown={e => (e.currentTarget.style.transform = 'scale(0.94)')}
                       onMouseUp={e => (e.currentTarget.style.transform = '')}

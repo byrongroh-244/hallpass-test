@@ -152,8 +152,8 @@ function LongTripAlert({ students, onMarkIn }: {
         {alertStudents.map(s => s.name).join(', ')} {alertStudents.length === 1 ? 'has' : 'have'} been out over 10 minutes
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
-        {alertStudents.map(s => (
-          <button key={s.name} onClick={() => onMarkIn(s.name, s.outTimestamp)}
+        {alertStudents.map((s, i) => (
+          <button key={`${i}-${s.name}`} onClick={() => onMarkIn(s.name, s.outTimestamp)}
             style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: C.red, color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
             Mark {s.name} In
           </button>
@@ -453,7 +453,7 @@ export default function Dashboard() {
             <>
               <SectionDivider label="Currently Out" count={studentsOut.length} accent={C.red} />
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '0.75rem' }}>
-                {studentsOut.map(s => <StudentTile key={s.name} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut />)}
+                {studentsOut.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut />)}
               </div>
             </>
           )}
@@ -463,7 +463,7 @@ export default function Dashboard() {
             <>
               <SectionDivider label={studentsOut.length > 0 ? 'Returned' : 'In Class'} count={studentsIn.length} accent={C.green} />
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '0.75rem' }}>
-                {studentsIn.map(s => <StudentTile key={s.name} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut={false} />)}
+                {studentsIn.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut={false} />)}
               </div>
             </>
           )}
@@ -473,7 +473,7 @@ export default function Dashboard() {
             <>
               <SectionDivider label="Not Scanned" count={studentsUnknown.length} />
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '0.75rem', opacity: 0.7 }}>
-                {studentsUnknown.map(s => <StudentTile key={s.name} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut={false} compact />)}
+                {studentsUnknown.map((s, i) => <StudentTile key={`${i}-${s.name}`} s={s} isPeriodActive={isPeriodActive} onAction={manualAction} tick={tick} isOut={false} compact />)}
               </div>
             </>
           )}

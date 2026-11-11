@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   savePeriod, saveFullRoster, replaceFullRoster, watchRoster,
-  parseRosterCSV, parseExcelTSV, deduplicateNames,
+  parseRosterCSV, parseExcelTSV, findDuplicateNames,
 } from '../firebase/roster'
 import type { RosterData, DayKey, PeriodNum, RosterPeriod, ExcelParseResult } from '../firebase/roster'
 import { watchHolds, setHold, clearHold, activeHoldsFor, isHoldActive, holdShortLabel } from '../firebase/holds'
@@ -248,6 +248,7 @@ function PeriodCard({ day, period, data, pausedCount, onClick }: {
   const times = PERIOD_TIMES.find(p => p.period === period)!
   const hasClass = !!(data?.name?.trim())
   const count = data?.students?.length ?? 0
+  const dupCount = findDuplicateNames(data?.students ?? []).length
 
   return (
     <button onClick={onClick} style={{ background: C.white, borderRadius: 12, border: `1.5px solid ${hasClass ? (day === 'red' ? 'rgba(239,68,68,0.3)' : 'rgba(15,23,42,0.2)') : C.border}`, padding: '14px 16px', textAlign: 'left', cursor: 'pointer', width: '100%', transition: 'box-shadow 0.15s' }}
@@ -274,6 +275,11 @@ function PeriodCard({ day, period, data, pausedCount, onClick }: {
       {pausedCount > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, fontSize: 11, fontWeight: 600, color: C.amberInk }}>
           <PauseIcon size={11} /> {pausedCount} hall pass{pausedCount === 1 ? '' : 'es'} paused
+        </div>
+      )}
+      {dupCount > 0 && (
+        <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, color: C.red }}>
+          ⚠ Duplicate student name — open to fix
         </div>
       )}
     </button>
@@ -319,7 +325,10 @@ function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onRes
     setNewName('')
   }
 
-  const removeStudent = (name: string) => setStudents(prev => prev.filter(s => s !== name))
+  // By position, not name — with two identical names (old uploads could make
+  // two "William B"s), filtering by name removed both.
+  const removeStudent = (index: number) => setStudents(prev => prev.filter((_, i) => i !== index))
+  const duplicateNames = findDuplicateNames(students)
 
   const handleCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
@@ -328,14 +337,12 @@ function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onRes
       const text = ev.target?.result as string
       const parsed = parseRosterCSV(text)
       const warnings: string[] = []
-      // Check for duplicates against existing
-      const allEntries = [...students, ...parsed].map(n => {
-        const p = n.split(' '); return { first: p[0], lastInitial: p[1] ?? '' }
-      })
+      // parseRosterCSV already makes names unique within the file (adding
+      // last-name letters where first names repeat) — just say where it did.
       const counts: Record<string, number> = {}
-      allEntries.forEach(e => { counts[e.first] = (counts[e.first] ?? 0) + 1 })
+      parsed.forEach(n => { const f = n.split(' ')[0]; counts[f] = (counts[f] ?? 0) + 1 })
       Object.entries(counts).forEach(([name, c]) => {
-        if (c > 1) warnings.push(`"${name}" appears ${c}× — last initials added`)
+        if (c > 1) warnings.push(`"${name}" appears ${c}× — last-name letters added`)
       })
       setCsvPreview({ names: parsed, warnings })
     }
@@ -344,11 +351,14 @@ function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onRes
 
   const confirmCSV = (replace: boolean) => {
     if (!csvPreview) return
+    // Merge = add anyone from the file not already on the roster (same name =
+    // same student). The old version re-split every name into first + initial
+    // and collapsed with a Set, which silently dropped the second of two
+    // students who both came out as e.g. "William B".
     const base = replace ? [] : students
-    const allEntries = [...base, ...csvPreview.names].map(n => {
-      const p = n.split(' '); return { first: p[0], lastInitial: p[1] ?? '' }
-    })
-    setStudents([...new Set(deduplicateNames(allEntries))].sort())
+    const have = new Set(base.map(n => n.toLowerCase()))
+    const added = csvPreview.names.filter(n => !have.has(n.toLowerCase()))
+    setStudents([...base, ...added].sort())
     setCsvPreview(null)
   }
 
@@ -465,15 +475,25 @@ function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onRes
           <button onClick={addStudent} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: C.ink, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>Add</button>
         </div>
 
+        {/* Duplicate names — two students with the same display name share one
+            hall-pass record and break the scanner's tile list. */}
+        {duplicateNames.length > 0 && (
+          <div style={{ background: C.redBg, border: `1px solid rgba(239,68,68,0.3)`, borderRadius: 8, padding: '10px 12px', marginBottom: 12, fontSize: 12, color: '#991b1b', lineHeight: 1.5 }}>
+            <strong>Duplicate {duplicateNames.length === 1 ? 'name' : 'names'}: {duplicateNames.join(', ')}.</strong>{' '}
+            Two students can't share a name — they'd share one hall pass. Remove one with × and add them back with more of the last name (e.g. "{duplicateNames[0].split(' ')[0]} Ba" / "{duplicateNames[0].split(' ')[0]} Br"), then Save. Re-uploading the class also fixes it.
+          </div>
+        )}
+
         {/* Student grid */}
         {students.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '1.5rem', color: C.muted, fontSize: 14 }}>No students yet</div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 6 }}>
-            {students.map(name => {
+            {students.map((name, i) => {
               const hold = holdByName[name]
+              const isDup = duplicateNames.includes(name.trim())
               return (
-                <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 46, padding: '6px 8px 6px 10px', borderRadius: 7, border: `1px solid ${hold ? C.amberBorder : C.border}`, background: hold ? C.amberBg : C.cloud, fontSize: 13, fontWeight: 500, color: C.ink }}>
+                <div key={`${i}-${name}`} style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 46, padding: '6px 8px 6px 10px', borderRadius: 7, border: `1px solid ${isDup ? C.red : hold ? C.amberBorder : C.border}`, background: hold ? C.amberBg : C.cloud, fontSize: 13, fontWeight: 500, color: C.ink }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
                     {hold && (
@@ -488,7 +508,7 @@ function PeriodEditor({ day, period, data, holds, onBack, onSave, onPause, onRes
                     style={{ width: 22, height: 22, borderRadius: 5, border: 'none', background: hold ? C.amber : 'transparent', color: hold ? '#fff' : C.muted, cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                     <PauseIcon />
                   </button>
-                  <button onClick={() => removeStudent(name)} aria-label={`Remove ${name}`}
+                  <button onClick={() => removeStudent(i)} aria-label={`Remove ${name}`}
                     style={{ width: 18, height: 18, borderRadius: '50%', border: 'none', background: 'transparent', color: C.muted, cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>×</button>
                 </div>
               )

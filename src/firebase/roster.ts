@@ -67,16 +67,63 @@ export async function replaceFullRoster(teacherId: string, data: RosterData): Pr
 
 // ─── Name parsing helpers ─────────────────────────────────────────────────────
 
-interface NameEntry { first: string; lastInitial: string }
+interface NameEntry { first: string; last: string }
 
 /**
- * Deduplicates a list of entries — if two share a first name,
- * appends last initial to both.
+ * Turns parsed students into display names that are unique within a class.
+ *
+ * - A first name nobody else in the class has stays as-is ("Liam").
+ * - Students sharing a first name each get the shortest start of their last
+ *   name that tells them apart: Liam Brown / Liam Kim → "Liam B" / "Liam K",
+ *   but William Baker / William Brown → "William Ba" / "William Br". Groups
+ *   with different last initials come out exactly as they always have, so
+ *   existing rosters and pauses keep their names.
+ * - Two students with the same first AND last name (or one last name that's
+ *   a prefix of the other) get their full last name, then " 2", " 3"… as a
+ *   last resort.
+ *
+ * Names must be unique: the scanner, dashboard and Firebase student records
+ * all key on the display name, so two students both called "William B" share
+ * one hall-pass record and break the scanner's tile list.
  */
 export function deduplicateNames(entries: NameEntry[]): string[] {
+  const groups: Record<string, number[]> = {}
+  entries.forEach((e, i) => { (groups[e.first.toLowerCase()] ??= []).push(i) })
+
+  const out: string[] = entries.map(e => e.first)
+  for (const idxs of Object.values(groups)) {
+    if (idxs.length < 2) continue
+    const lasts = idxs.map(i => entries[i].last.trim())
+    idxs.forEach((i, j) => {
+      // Shortest start of this student's last name that isn't also the start
+      // of anyone else's in the group (so no two labels can match).
+      const mine = lasts[j]
+      const others = lasts.filter((_, x) => x !== j).map(l => l.toLowerCase())
+      let k = 1
+      while (k < mine.length && others.some(o => o.startsWith(mine.slice(0, k).toLowerCase()))) k++
+      const part = mine.slice(0, k)
+      out[i] = part ? `${entries[i].first} ${part[0].toUpperCase()}${part.slice(1)}` : entries[i].first
+    })
+  }
+  return ensureUnique(out)
+}
+
+/** Appends " 2", " 3"… to exact repeats so every name in the list is distinct. */
+export function ensureUnique(names: string[]): string[] {
+  const seen = new Set<string>()
+  return names.map(n => {
+    let name = n; let c = 2
+    while (seen.has(name.toLowerCase())) name = `${n} ${c++}`
+    seen.add(name.toLowerCase())
+    return name
+  })
+}
+
+/** Names that appear more than once in a list (case-insensitive). */
+export function findDuplicateNames(names: string[]): string[] {
   const counts: Record<string, number> = {}
-  entries.forEach(e => { counts[e.first] = (counts[e.first] ?? 0) + 1 })
-  return entries.map(e => counts[e.first] > 1 ? `${e.first} ${e.lastInitial}` : e.first)
+  names.forEach(n => { const k = n.trim().toLowerCase(); counts[k] = (counts[k] ?? 0) + 1 })
+  return [...new Set(names.filter(n => counts[n.trim().toLowerCase()] > 1).map(n => n.trim()))]
 }
 
 /**
@@ -99,7 +146,7 @@ export function parseRosterCSV(csvText: string): string[] {
     const lastName = raw.slice(0, commaIdx).trim()
     const first = raw.slice(commaIdx + 1).trim().split(' ')[0].trim()
     if (!first) continue
-    entries.push({ first, lastInitial: lastName[0]?.toUpperCase() ?? '' })
+    entries.push({ first, last: lastName })
   }
   return deduplicateNames(entries)
 }
@@ -157,7 +204,6 @@ export function parseExcelTSV(tsvText: string): ExcelParseResult {
     const lastName = nameRaw.slice(0, commaIdx).trim()
     const first = nameRaw.slice(commaIdx + 1).trim().split(' ')[0].trim()
     if (!first) continue
-    const lastInitial = lastName[0]?.toUpperCase() ?? '?'
 
     // Parse course: "1(Red) Algebra I" or "2(Blk) Geometry"
     const m = courseRaw.match(/^(\d+)\((Red|Blk)\)\s*(.+)$/)
@@ -171,7 +217,7 @@ export function parseExcelTSV(tsvText: string): ExcelParseResult {
     const key = `${day}_${periodNum}`
 
     if (!periodEntries[key]) periodEntries[key] = { name: className, entries: [] }
-    periodEntries[key].entries.push({ first, lastInitial })
+    periodEntries[key].entries.push({ first, last: lastName })
   }
 
   // Build roster with deduplication
@@ -185,11 +231,11 @@ export function parseExcelTSV(tsvText: string): ExcelParseResult {
 
     // Warn about duplicates
     const dupes = data.entries.filter((e, i, arr) =>
-      arr.findIndex(x => x.first === e.first) !== i
+      arr.findIndex(x => x.first.toLowerCase() === e.first.toLowerCase()) !== i
     )
     if (dupes.length > 0) {
       const names = [...new Set(dupes.map(d => d.first))]
-      warnings.push(`${key}: Duplicate first names found — last initials added for: ${names.join(', ')}`)
+      warnings.push(`${key}: Duplicate first names found — last-name letters added for: ${names.join(', ')}`)
     }
   }
 
