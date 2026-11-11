@@ -2,7 +2,6 @@
   "name": "Hall Pass",
   "short_name": "Hall Pass",
   "description": "Student hall pass tracking system",
-  "start_url": "/hallpass-test/",
   "scope": "/hallpass-test/",
   "display": "standalone",
   "orientation": "any",

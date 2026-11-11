@@ -9,6 +9,11 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Hall Pass" />
     <link rel="apple-touch-icon" href="/hallpass-test/icon-192-v2.png" />
+    <!-- Makes the whole site one Home Screen app. Without this link iPadOS
+         only treats the folder of the page you saved (e.g. one teacher's
+         /t/smith/) as "the app", so another teacher's pages on a shared iPad
+         open with a floating Safari bar (close / back / reload). -->
+    <link rel="manifest" href="/hallpass-test/manifest.json" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Fraunces:wght@600;700&display=swap" rel="stylesheet" />
   </head>
