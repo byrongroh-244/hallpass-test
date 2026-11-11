@@ -11,6 +11,7 @@ import { finishedMsByStudent, budgetLevel, BUDGET_COLORS } from '../firebase/tim
 import { getActiveHold, holdLongLabel } from '../firebase/holds'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
+import { setKioskLock, clearKioskLock } from '../utils/kioskLock'
 import { scheduleStr, writeStudentOut, writeStudentIn, writeAutoReset, writeStaleReset } from '../firebase/writes'
 import { getEffectivePin, getTeacherSettings } from '../firebase/teachers'
 import { fmt, fmt12, todayStr } from '../utils/schedule'
@@ -58,6 +59,27 @@ export default function Scanner() {
   const { teacherId: teacherIdParam } = useParams<{ teacherId: string }>()
   const teacherId = teacherIdParam ?? ''
   const teacherValid = useTeacherGuard(teacherId)
+
+  // Kiosk lock (utils/kioskLock.ts): once this Scanner is up for a real
+  // teacher, this device stays on it until the PIN is entered. A Scanner for
+  // a profile that doesn't exist must never trap the device, so that case
+  // clears any lock instead.
+  useEffect(() => {
+    if (teacherValid === true && teacherId) setKioskLock(`/t/${teacherId}/scanner`)
+    if (teacherValid === false) clearKioskLock()
+  }, [teacherValid, teacherId])
+
+  // Make the iPad back swipe a no-op: keep a duplicate Scanner entry on top
+  // of the history, and put it back every time a swipe pops it. The swipe
+  // then lands on this same Scanner (same route — nothing remounts). If a
+  // swipe ever does reach another page, KioskGuard sends it straight back.
+  useEffect(() => {
+    if (teacherValid !== true) return
+    const trap = () => window.history.pushState(window.history.state, '', window.location.href)
+    trap()
+    window.addEventListener('popstate', trap)
+    return () => window.removeEventListener('popstate', trap)
+  }, [teacherValid])
   const lsKey = useCallback((base: string) => lsKeyFor(teacherId, base), [teacherId])
 
   const [day, setDay] = useState<ScheduleDay>(() =>
@@ -921,7 +943,7 @@ export default function Scanner() {
                       if (full === adminPin) {
                         setPinTarget(null)
                         if (pinTarget === 'home') {
-                          setScreen('main'); navigate(`/t/${teacherId}`)
+                          setScreen('main'); clearKioskLock(); navigate(`/t/${teacherId}`)
                         } else {
                           setMaxOut(pickMaxOut)
                           localStorage.setItem(lsKey('hp_maxOut'), String(pickMaxOut))

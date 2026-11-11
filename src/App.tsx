@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import TeacherPicker from './pages/TeacherPicker'
 import TeacherHome from './pages/TeacherHome'
 import Scanner from './pages/Scanner'
@@ -7,10 +7,25 @@ import Analytics from './pages/Analytics'
 import Editor from './pages/Editor'
 import TeacherSettings from './pages/TeacherSettings'
 import { LEGACY_TEACHER_ID } from './firebase/teachers'
+import { getKioskLock } from './utils/kioskLock'
+
+/**
+ * While this device has a locked Scanner (see utils/kioskLock.ts), any other
+ * page — reached by the iPad back/forward swipe, a bookmark, or a typed URL —
+ * is replaced by that Scanner before it renders. Nothing else mounts, so no
+ * teacher page ever flashes up for a student.
+ */
+function KioskGuard({ children }: { children: React.ReactNode }) {
+  const { pathname } = useLocation()
+  const lock = getKioskLock()
+  if (lock && pathname !== lock) return <Navigate to={lock} replace />
+  return <>{children}</>
+}
 
 export default function App() {
   return (
     <BrowserRouter basename="/hallpass-test">
+      <KioskGuard>
       <Routes>
         {/* Teacher picker — the new home page */}
         <Route path="/" element={<TeacherPicker />} />
@@ -34,6 +49,7 @@ export default function App() {
         {/* Anything else falls back to the picker */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </KioskGuard>
     </BrowserRouter>
   )
 }
