@@ -101,7 +101,8 @@ export default function Scanner() {
   const [tick, setTick] = useState(0)
   const trackRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
-  const dragStartX = useRef(0)
+  const grabOffset = useRef(0)      // where on the thumb the finger landed (px from its left edge)
+  const progressRef = useRef(0)     // latest swipe progress, readable from pointer-up
 
   // Ref holds all data needed by commit — avoids stale closures entirely
   const swipeRef = useRef<{
@@ -365,6 +366,7 @@ export default function Scanner() {
     const { name, action, period: p, day: d, start: s, outTimes: ot } = swipeRef.current
     if (!p || !name) return
     isDragging.current = false
+    progressRef.current = 0
 
     const now = serverNow()
     const today = new Date().toISOString().split('T')[0]
@@ -394,29 +396,75 @@ export default function Scanner() {
     }
   }, [teacherId])
 
-  // Pointer events — work on both mouse and touch, no separate handlers needed
-  const onPointerDown = (e: React.PointerEvent) => {
-    isDragging.current = true;
-    dragStartX.current = e.clientX;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId)
+  // Swipe-to-confirm.
+  //
+  // Progress comes from where the finger IS on the track (measured fresh on
+  // every move), not from how far it has travelled since touch-down. The old
+  // delta version used a hard-coded track inset (60px) and the start point,
+  // so anything that shifted or resized the popup mid-drag on iPad Safari —
+  // landscape's collapsing toolbar fires resize events while you drag — could
+  // leave the thumb drawn at the end while progress sat under the 95%
+  // threshold, and nothing happened. Also:
+  //  - releasing past 80% commits, so "dragged it to the end" always counts;
+  //  - capture goes on the thumb itself (currentTarget), never the SVG arrow
+  //    inside it, which Safari handles badly;
+  //  - pointercancel (Safari taking over the gesture) behaves like a release.
+  const COMMIT_AT = 0.95
+  const COMMIT_ON_RELEASE_AT = 0.8
+
+  const progressFromPointer = (clientX: number): number => {
+    const track = trackRef.current
+    if (!track) return 0
+    const rect = track.getBoundingClientRect()
+    const thumb = isIPadLandscape ? 48 : 44
+    const travel = rect.width - thumb - 8          // 4px inset each side
+    if (travel <= 0) return 0
+    const left = clientX - rect.left - 4 - grabOffset.current
+    return Math.max(0, Math.min(1, left / travel))
+  }
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const thumbEl = e.currentTarget
+    isDragging.current = true
+    grabOffset.current = e.clientX - thumbEl.getBoundingClientRect().left
+    try { thumbEl.setPointerCapture(e.pointerId) } catch { /* not fatal */ }
     e.preventDefault()
   }
 
-  const onPointerMove = (e: React.PointerEvent) => {
-    if (!isDragging.current || !trackRef.current) return
-    const maxX = trackRef.current.offsetWidth - 60
-    const x = Math.max(0, Math.min(e.clientX - dragStartX.current, maxX))
-    const pct = x / maxX
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging.current) return
+    const pct = progressFromPointer(e.clientX)
+    progressRef.current = pct
     setSwipeProgress(pct)
-    if (pct >= 0.95) commitSwipe()
+    if (pct >= COMMIT_AT) commitSwipe()
     e.preventDefault()
   }
 
   const onPointerUp = () => {
     if (!isDragging.current) return
     isDragging.current = false
-    setSwipeProgress(p => p < 0.95 ? 0 : p)
+    if (progressRef.current >= COMMIT_ON_RELEASE_AT) { commitSwipe(); return }
+    progressRef.current = 0
+    setSwipeProgress(0)
   }
+
+  // While the swipe popup is open: stop iPad Safari from turning the drag
+  // into a page scroll / toolbar gesture (React's touch listeners are
+  // passive, so this has to be a native listener), and freeze the page
+  // behind it.
+  useEffect(() => {
+    if (screen !== 'swipe') return
+    progressRef.current = 0
+    const track = trackRef.current
+    const block = (ev: TouchEvent) => { if (ev.cancelable) ev.preventDefault() }
+    track?.addEventListener('touchmove', block, { passive: false })
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      track?.removeEventListener('touchmove', block)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [screen])
 
   void tick
   const isCheckingOut = swipeAction === 'out'
@@ -635,11 +683,11 @@ export default function Scanner() {
                 onPointerCancel={onPointerUp}
                 style={{ position: 'absolute', top: '50%', transform: 'translateY(-50%)', left: thumbLeft, width: isIPadLandscape ? 48 : 44, height: isIPadLandscape ? 48 : 44, borderRadius: '50%', background: accent, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', touchAction: 'none', boxShadow: '0 2px 8px rgba(0,0,0,0.2)', transition: swipeProgress === 0 ? 'left 0.25s' : 'none' }}
               >
-                <svg width="22" height="22" fill="none" stroke="white" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
+                <svg width="22" height="22" fill="none" stroke="white" viewBox="0 0 24 24" style={{ pointerEvents: 'none' }}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
               </div>
             </div>
 
-            <button onClick={() => { isDragging.current = false; setSwipeProgress(0); setScreen('main') }} style={{ width: '100%', padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: 'transparent', color: C.slate, fontSize: 14 }}>
+            <button onClick={() => { isDragging.current = false; progressRef.current = 0; setSwipeProgress(0); setScreen('main') }} style={{ width: '100%', padding: 10, border: `1px solid ${C.border}`, borderRadius: 8, background: 'transparent', color: C.slate, fontSize: 14 }}>
               Cancel
             </button>
           </div>
