@@ -11,6 +11,7 @@ import { serverNow } from '../firebase/clock'
 import { setTimeLimit, clearTimeLimit, TIME_LIMIT_CHOICES, DEFAULT_TIME_LIMIT } from '../firebase/timeLimits'
 import type { TimeLimit } from '../firebase/timeLimits'
 import { useTimeLimits } from '../hooks/useTimeLimits'
+import { migrateStudentName } from '../firebase/rename'
 import { PERIOD_TIMES, fmt12 } from '../data/periods'
 import { useTeacherGuard } from '../hooks/useTeacherGuard'
 import TeacherNotFound from '../components/TeacherNotFound'
@@ -373,8 +374,10 @@ function PeriodCard({ day, period, data, pausedCount, timeLimit, onClick }: {
 
 // ─── Period editor ────────────────────────────────────────────────────────────
 
-function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack, onSave, onPause, onResume }: {
+function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack, onSave, onPause, onResume, onRenameHistory }: {
   day: DayKey; period: PeriodNum; data?: RosterPeriod
+  /** Moves trips / status / pause from the old name to the new one (rename.ts). */
+  onRenameHistory: (oldName: string, newName: string) => Promise<void>
   timeLimit: TimeLimit | null
   onTimeLimit: (limit: TimeLimit | null) => Promise<void>
   /** Holds currently in effect for this period (expired ones already filtered out). */
@@ -390,6 +393,38 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
   const [saving, setSaving] = useState(false)
   const [pauseTarget, setPauseTarget] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Renaming. Tap a name to edit it in place. Like every other roster change
+  // it's only kept when you press Save — that's also when the student's trip
+  // history, in/out status and any pause move to the new name. Cancel undoes
+  // it. renamedFrom maps a CURRENT name to the name it had when this screen
+  // opened (so renaming twice still moves history from the original).
+  const [renamedFrom, setRenamedFrom] = useState<Record<string, string>>({})
+  const [editIndex, setEditIndex] = useState<number | null>(null)
+  const [editValue, setEditValue] = useState('')
+  const [editError, setEditError] = useState('')
+  const savedNames = new Set(data?.students ?? [])
+
+  const startRename = (i: number) => { setEditIndex(i); setEditValue(students[i]); setEditError('') }
+  const cancelRename = () => { setEditIndex(null); setEditError('') }
+  const commitRename = () => {
+    if (editIndex === null) return
+    const oldName = students[editIndex]
+    const next = editValue.trim().replace(/\s+/g, ' ')
+    if (!next || next === oldName) { cancelRename(); return }
+    if (students.some((n, j) => j !== editIndex && n.trim().toLowerCase() === next.toLowerCase())) {
+      setEditError(`There's already a "${next}" in this class`); return
+    }
+    setStudents(prev => prev.map((n, j) => (j === editIndex ? next : n)))
+    setRenamedFrom(prev => {
+      const m = { ...prev }
+      const original = m[oldName] ?? (savedNames.has(oldName) ? oldName : undefined)
+      delete m[oldName]
+      if (original && original !== next) m[next] = original
+      return m
+    })
+    cancelRename()
+  }
   const times = PERIOD_TIMES.find(p => p.period === period)!
 
   // Pauses are saved the moment they're set — they live in their own Firebase
@@ -397,6 +432,7 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
   // covers the class name and student list.
   const holdByName: Record<string, PassHold> = {}
   holds.forEach(h => { holdByName[h.name] = h })
+  const holdFor = (name: string): PassHold | undefined => holdByName[name] ?? (renamedFrom[name] ? holdByName[renamedFrom[name]] : undefined)
 
   const addStudent = () => {
     const trimmed = newName.trim()
@@ -414,7 +450,12 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
 
   // By position, not name — with two identical names (old uploads could make
   // two "William B"s), filtering by name removed both.
-  const removeStudent = (index: number) => setStudents(prev => prev.filter((_, i) => i !== index))
+  const removeStudent = (index: number) => {
+    const name = students[index]
+    setStudents(prev => prev.filter((_, i) => i !== index))
+    setRenamedFrom(prev => { const m = { ...prev }; delete m[name]; return m })
+    if (editIndex !== null) cancelRename()
+  }
   const duplicateNames = findDuplicateNames(students)
 
   const handleCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -452,7 +493,18 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
   const handleSave = async () => {
     setSaving(true)
     await onSave({ name: className.trim(), students })
+    // Move history for renamed students that are still on the roster.
+    const failed: string[] = []
+    for (const [current, original] of Object.entries(renamedFrom)) {
+      if (!students.includes(current)) continue
+      // Old name still on the roster = this was one of two duplicate names
+      // sharing one record; leave the shared history with the one that kept it.
+      if (students.includes(original)) continue
+      try { await onRenameHistory(original, current) }
+      catch (err) { console.error('rename history failed', err); failed.push(`${original} → ${current}`) }
+    }
     setSaving(false)
+    if (failed.length) alert(`Saved, but trip history couldn't be moved for: ${failed.join(', ')}. Check your connection and rename again.`)
     onBack()
   }
 
@@ -494,12 +546,19 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
           </label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {holds.map(h => {
-              const onRoster = students.includes(h.name)
+              // Renamed on this screen but not saved yet — the pause moves with them on Save.
+              const renamedTo = Object.keys(renamedFrom).find(cur => renamedFrom[cur] === h.name && students.includes(cur))
+              const onRoster = students.includes(h.name) || !!renamedTo
               return (
                 <div key={h.name} style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44, padding: '6px 10px 6px 12px', borderRadius: 8, background: C.amberBg, fontSize: 13 }}>
                   <div style={{ flex: 1, minWidth: 0, lineHeight: 1.35 }}>
-                    <span style={{ fontWeight: 600, color: C.ink }}>{h.name}</span>{' '}
+                    <span style={{ fontWeight: 600, color: C.ink }}>{renamedTo ?? h.name}</span>{' '}
                     <span style={{ color: C.slate, whiteSpace: 'nowrap' }}>· {h.until === null ? 'no end date' : `until ${holdShortLabel(h.until)}`}</span>
+                    {renamedTo && (
+                      <div style={{ fontSize: 11, color: C.slate, marginTop: 2 }}>
+                        Renamed from {h.name} — moves to the new name when you Save.
+                      </div>
+                    )}
                     {!onRoster && (
                       <div style={{ fontSize: 11, color: C.amberInk, marginTop: 2 }}>
                         Not on this roster — if the name changed, remove this and pause the new name.
@@ -507,7 +566,7 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
                     )}
                   </div>
                   {onRoster && (
-                    <button onClick={() => setPauseTarget(h.name)}
+                    <button onClick={() => setPauseTarget(renamedTo ?? h.name)}
                       style={{ height: 28, padding: '0 10px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.white, color: C.slate, fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}>
                       Change
                     </button>
@@ -570,7 +629,7 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
         {duplicateNames.length > 0 && (
           <div style={{ background: C.redBg, border: `1px solid rgba(239,68,68,0.3)`, borderRadius: 8, padding: '10px 12px', marginBottom: 12, fontSize: 12, color: '#991b1b', lineHeight: 1.5 }}>
             <strong>Duplicate {duplicateNames.length === 1 ? 'name' : 'names'}: {duplicateNames.join(', ')}.</strong>{' '}
-            Two students can't share a name — they'd share one hall pass. Remove one with × and add them back with more of the last name (e.g. "{duplicateNames[0].split(' ')[0]} Ba" / "{duplicateNames[0].split(' ')[0]} Br"), then Save. Re-uploading the class also fixes it.
+            Two students can't share a name — they'd share one hall pass. Tap one of them to rename it with more of the last name (e.g. "{duplicateNames[0].split(' ')[0]} Ba" / "{duplicateNames[0].split(' ')[0]} Br"), then Save. Re-uploading the class also fixes it.
           </div>
         )}
 
@@ -580,12 +639,31 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 6 }}>
             {students.map((name, i) => {
-              const hold = holdByName[name]
+              const hold = holdFor(name)
               const isDup = duplicateNames.includes(name.trim())
               return (
                 <div key={`${i}-${name}`} style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 46, padding: '6px 8px 6px 10px', borderRadius: 7, border: `1px solid ${isDup ? C.red : hold ? C.amberBorder : C.border}`, background: hold ? C.amberBg : C.cloud, fontSize: 13, fontWeight: 500, color: C.ink }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+                    {editIndex === i ? (
+                      <>
+                        <input autoFocus value={editValue} aria-label={`New name for ${name}`}
+                          onChange={e => { setEditValue(e.target.value); setEditError('') }}
+                          onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') cancelRename() }}
+                          onBlur={commitRename}
+                          style={{ width: '100%', boxSizing: 'border-box', height: 28, padding: '0 6px', borderRadius: 5, border: `1.5px solid ${editError ? C.red : C.ink}`, fontSize: 13, fontWeight: 500, color: C.ink, fontFamily: 'inherit', outline: 'none' }} />
+                        {editError && <div style={{ fontSize: 10, fontWeight: 600, color: C.red, marginTop: 2, lineHeight: 1.3 }}>{editError}</div>}
+                      </>
+                    ) : (
+                      <button onClick={() => startRename(i)} title="Tap to rename" aria-label={`Rename ${name}`}
+                        style={{ display: 'block', width: '100%', textAlign: 'left', background: 'none', border: 'none', padding: 0, margin: 0, font: 'inherit', color: 'inherit', cursor: 'text', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {name}
+                      </button>
+                    )}
+                    {editIndex !== i && renamedFrom[name] && (
+                      <div style={{ fontSize: 10, fontWeight: 600, lineHeight: 1.3, color: C.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        was {renamedFrom[name]} · Save to keep
+                      </div>
+                    )}
                     {hold && (
                       <div style={{ fontSize: 10, fontWeight: 600, lineHeight: 1.3, color: C.amberInk, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {hold.until === null ? 'No end date' : `Until ${holdShortLabel(hold.until)}`}
@@ -609,7 +687,7 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
         {students.length > 0 && (
           <div style={{ fontSize: 11, color: C.muted, marginTop: 12, lineHeight: 1.5 }}>
             <span style={{ display: 'inline-block', verticalAlign: '-1px', marginRight: 5 }}><PauseIcon size={10} /></span>
-            pauses a student's hall pass &nbsp;·&nbsp; × removes them from the class
+            pauses a student's hall pass &nbsp;·&nbsp; × removes them from the class &nbsp;·&nbsp; tap a name to rename (their trips go with them)
           </div>
         )}
       </div>
@@ -629,7 +707,7 @@ function PeriodEditor({ day, period, data, holds, timeLimit, onTimeLimit, onBack
       {pauseTarget && (
         <PauseDialog
           name={pauseTarget}
-          existing={holdByName[pauseTarget] ?? null}
+          existing={holdFor(pauseTarget) ?? null}
           onCancel={() => setPauseTarget(null)}
           onConfirm={async until => { await onPause(pauseTarget, until); setPauseTarget(null) }}
           onResume={async () => { await onResume(pauseTarget); setPauseTarget(null) }}
@@ -759,6 +837,7 @@ export default function Editor() {
           onSave={async (data) => handlePeriodSave(active.day, active.period, data)}
           onPause={(name, until) => handlePause(key, name, until)}
           onResume={name => handleResume(key, name)}
+          onRenameHistory={async (oldName, newName) => { await migrateStudentName(teacherId, active.day, active.period, oldName, newName) }}
         />
       </div>
     )
